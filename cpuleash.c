@@ -7,6 +7,7 @@
 //                        needs to be checked.
 // TODO: See clock_nanosleep for better implementation possibility
 #include <stdio.h>
+#include <math.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -19,6 +20,8 @@
 
 #define BUF_MAX 256
 #define DEBUG 1
+
+#define NANO_MULT 1000000000L
 
 typedef struct _pid_stat_t {
   int pid;
@@ -299,32 +302,45 @@ long get_clk_tck_per_sec (void)
 }
 */
 
+struct timespec nsec_to_timespec (long int nsec)
+{
+  struct timespec temp;
+
+  temp.tv_nsec = nsec % NANO_MULT;
+  temp.tv_sec  = nsec / NANO_MULT;
+
+  return temp;
+}
+
+long int timespec_to_nsec (struct timespec temp)
+{
+  return temp.tv_sec * NANO_MULT + temp.tv_nsec;
+}
+
+
 /* WARNING: TEST FUNCTION. FIXME: Logic seems good, but could not leash the cpu as per the set value, need to investigate */
 /* remainin sleep time going to negative, problem with calculation, possibly with the scaling */
+#define SAMPLE_NSEC (1 * NANO_MULT)
+/* NOTE: WORKS IN SINGLE THREADED APPLICATION */
 void leash_cpu (int pid, double percent)
 {
   int take_child_flag = 0, stop_flag = 0;
   pid_stat_t new_pid_stat, old_pid_stat;
   FILE *fp;
-  long int old_util, new_util, delta_util, adjustment, target_clk_delta, hz, adjustment_stop_time, temp;
-  struct timespec stop_time, stop_time_min, remaining_sleep_time, sample_time;
+  long int old_util, new_util, delta_util, adjustment, target_clk_delta, hz, adjustment_stop_time, temp, target_nsec;
+  struct timespec stop_time, stop_time_base, remaining_sleep_time, sample_time;
   
   hz = get_clk_tck_per_sec ();
   
   stop_flag = 0;
-  stop_time.tv_sec = 0;
-  stop_time.tv_nsec = 0;
-  
-  sample_time.tv_sec  = 2;
-  sample_time.tv_nsec = 0;
-  
-  target_clk_delta = (long int) ((percent / 100.0) * hz) * ((sample_time.tv_sec * 1000000 + sample_time.tv_nsec) / 1000000.0); /* approximate */
 
-  stop_time_min.tv_nsec = (long int) ((target_clk_delta / (double) hz) * 1000000);
-  stop_time_min.tv_sec  = stop_time_min.tv_nsec / 1000000;
-  stop_time_min.tv_nsec = stop_time_min.tv_nsec % 1000000;
+  sample_time = nsec_to_timespec (SAMPLE_NSEC);
+  
+  target_nsec      = (long int) ((percent / 100.0) * timespec_to_nsec (sample_time));
+  target_clk_delta = (long int) ceill ((target_nsec / (long double) NANO_MULT) * hz);
+  stop_time        = nsec_to_timespec (timespec_to_nsec (sample_time) - target_nsec);
 
-  stop_time = stop_time_min;
+  stop_time_base = stop_time;
 
   fp = open_pid_stat (pid);
   while (1)
@@ -336,6 +352,7 @@ void leash_cpu (int pid, double percent)
     {
       old_util += old_pid_stat.cutime + old_pid_stat.cstime;
     }
+
     
     if (stop_flag)
     {
@@ -348,18 +365,13 @@ void leash_cpu (int pid, double percent)
       kill (pid, SIGCONT);
 
       /* Compute the remaining time within the sample range */
-      remaining_sleep_time.tv_nsec = (sample_time.tv_sec * 1000000 + sample_time.tv_nsec) - (stop_time.tv_sec * 1000000 + stop_time.tv_nsec);
-      remaining_sleep_time.tv_sec  = remaining_sleep_time.tv_nsec / 1000000;
-      remaining_sleep_time.tv_nsec = remaining_sleep_time.tv_nsec % 1000000;
+      remaining_sleep_time = nsec_to_timespec (timespec_to_nsec (sample_time) - timespec_to_nsec (stop_time));
     }
     else
     {    
       /* Compute the remaining time within the sample range */
       do_complete_nanosleep (stop_time);
-      remaining_sleep_time.tv_nsec = (sample_time.tv_sec * 1000000 + sample_time.tv_nsec) - (stop_time.tv_sec * 1000000 + stop_time.tv_nsec);
-      remaining_sleep_time.tv_sec  = remaining_sleep_time.tv_nsec / 1000000;
-      remaining_sleep_time.tv_nsec = remaining_sleep_time.tv_nsec % 1000000;
-      //remaining_sleep_time = sample_time;
+      remaining_sleep_time = nsec_to_timespec (timespec_to_nsec (sample_time) - timespec_to_nsec (stop_time));
     }
     
 
@@ -380,9 +392,9 @@ void leash_cpu (int pid, double percent)
       new_util += new_pid_stat.cutime + new_pid_stat.cstime;
     }
     
-    delta_util = new_util - old_util;
-    adjustment = target_clk_delta - delta_util;
-    adjustment_stop_time = labs ((adjustment / (double) hz) * 1000000); // target_clk_delta and delta_util is already scaled to sample_time
+    delta_util           = new_util - old_util;
+    adjustment           = target_clk_delta - delta_util;
+    adjustment_stop_time = labs ((adjustment / (double) hz) * NANO_MULT); // target_clk_delta and delta_util is already scaled to sample_time
 
     #ifdef DEBUG
     printf ("ADJUST: %ld, clk = %ld\n", adjustment_stop_time, adjustment);  
@@ -391,11 +403,8 @@ void leash_cpu (int pid, double percent)
 
     if (adjustment >= 0)
     {
-      stop_flag = 0;
-      /* We need to cap the adjustment from dropping below the min sleeping time */
-//      temp = ((stop_time.tv_sec * 1000000 + stop_time.tv_nsec) - adjustment_stop_time);
-//      stop_time.tv_sec  = temp / 1000000;
-//      stop_time.tv_nsec = temp % 1000000;
+      stop_flag = 1;
+      stop_time = nsec_to_timespec (timespec_to_nsec (stop_time_base) - adjustment_stop_time);
       #ifdef DEBUG
       printf ("--\n");
       #endif
@@ -403,9 +412,7 @@ void leash_cpu (int pid, double percent)
     else
     {
       stop_flag = 1;
-//     temp = ((stop_time.tv_sec * 1000000 + stop_time.tv_nsec) + adjustment_stop_time);
-//     stop_time.tv_sec  = temp / 1000000;
-//     stop_time.tv_nsec = temp % 1000000;
+      stop_time = nsec_to_timespec (timespec_to_nsec (stop_time_base) + adjustment_stop_time);
       #ifdef DEBUG
       printf ("++\n");
       #endif
