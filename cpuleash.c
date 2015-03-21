@@ -1,11 +1,14 @@
 // Challenges:
 // Compute the amount of sleep required for each pid
 // What should be the sample time within which the cpu utilization should be taken
-// Once the sleep time is determined, how will it be spent. For example if time for sleep is s seconds
 //                        and the sample time is t. Then when we sleep in the loop for s seconds and then
 //                        we again sleep for t seconds in the main loop making the sample interval s + t
 //                        needs to be checked.
 // TODO: See clock_nanosleep for better implementation possibility
+// TODO: handle multi threaded application
+// TODO: Handle process group capping
+// TODO: Maybe thermal capping in future
+// TODO: Deamonize
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
@@ -72,7 +75,7 @@ typedef struct _pid_stat_t {
 
 void usage (void)
 {
-  printf ("Enter a pid\n");
+  printf ("Enter a pid and percentage to cap\n");
 }
 
 FILE *open_pid_stat (int pid)
@@ -244,63 +247,6 @@ long get_clk_tck_per_sec (void)
   return sysconf (_SC_CLK_TCK);
 }
 
-/* WARNING: TEST FUNCTION */
-/*void leash_cpu (int pid, double percent)
-{
-  FILE *fp;
-  pid_stat_t old_pid_stat, new_pid_stat;
-  long int sample_sec_base = 2, sample_nsec_base = 0, sample_sec, sample_nsec, max_util, hz, new_total_time, old_total_time, delta_time, sleep_time_sec = 0, sleep_time_nsec = 0;
-  int take_child_time_flag = 1;
-  double temp;
-
-  fp = open_pid_stat (pid);
-  read_pid_stat_fields (fp, &new_pid_stat);
-  hz = get_clk_tck_per_sec ();
-  
-  old_pid_stat = new_pid_stat;
-
-  while (1)
-  {
-    fflush (fp);
-    sample_nsec = sample_sec_base * 1000000 + sample_nsec_base;
-   // sample_nsec = sample_nsec - (sleep_time_sec * 1000000 + sleep_time_nsec);
-    sample_sec = sample_nsec / 1000000;
-    sample_nsec = sample_nsec % 1000000;
-
-    printf ("sampling ... \n");
-    do_complete_nanosleep (sample_sec, sample_nsec); // We can control the sample time, now it is hard coded 1 second
-    fflush (fp);
-    read_pid_stat_fields (fp, &new_pid_stat);
-
-    new_total_time = new_pid_stat.utime + new_pid_stat.stime;
-    old_total_time = old_pid_stat.utime + old_pid_stat.stime;
-    if (take_child_time_flag)
-    {
-      new_total_time += new_pid_stat.cutime + new_pid_stat.cstime;
-      old_total_time += old_pid_stat.cutime + old_pid_stat.cstime;
-    }
-
-    max_util = (((percent / 100.0) * hz) * (sample_sec * 1000000 + sample_nsec))/1000000;
-    delta_time = new_total_time - old_total_time;
-    printf ("new_total_time = %ld, old_total_time = %ld\n", new_total_time, old_total_time);
-    old_pid_stat = new_pid_stat;
-    temp = delta_time - max_util;
-    printf ("max_util = %ld, delta_time = %ld, temp = %ld\n", max_util, delta_time, temp);
-    if (temp > 0)
-    {
-      sleep_time_sec = (temp / (double) hz) * 1000000;
-      sleep_time_nsec = sleep_time_sec % 1000000;
-      sleep_time_sec /= 1000000;
-      printf ("sleep time %ld, %ld\n", sleep_time_sec, sleep_time_nsec);
-    }
-      kill (pid, SIGSTOP);
-      printf ("sleeping ...\n");
-      do_complete_nanosleep (sleep_time_sec, sleep_time_nsec);
-      kill (pid, SIGCONT);
-//    get_pid_cpu_util (fp);
-  }
-}
-*/
 
 struct timespec nsec_to_timespec (long int nsec)
 {
@@ -318,8 +264,6 @@ long int timespec_to_nsec (struct timespec temp)
 }
 
 
-/* WARNING: TEST FUNCTION. FIXME: Logic seems good, but could not leash the cpu as per the set value, need to investigate */
-/* remainin sleep time going to negative, problem with calculation, possibly with the scaling */
 #define SAMPLE_NSEC (1 * NANO_MULT)
 /* NOTE: WORKS IN SINGLE THREADED APPLICATION */
 void leash_cpu (int pid, double percent)
@@ -417,23 +361,8 @@ void leash_cpu (int pid, double percent)
       printf ("++\n");
       #endif
     }
-/*     if (stop_time.tv_sec * 1000000 + stop_time.tv_nsec < stop_time_min.tv_sec * 1000000 + stop_time_min.tv_nsec)
-      {
-        stop_time = stop_time_min;
-      }*/
-     /* if (stop_time.tv_sec <= 0)
-      {
-        stop_time.tv_sec = 0;
-        if (stop_time.tv_nsec <= 0)
-        {
-          stop_time.tv_nsec = 0;
-        }
-      }*/
-      /*if (stop_time.tv_sec * 1000000 + stop_time.tv_nsec > sample_time.tv_sec * 1000000 + sample_time.tv_nsec)
-      {
-        stop_time = sample_time;
-      }*/
-     printf ("stop_time.tv_sec = %d, stop_time.tv_nsec = %ld\n", stop_time.tv_sec, stop_time.tv_nsec);
+    // NOTE: Make sure timing does not overflow the sample time and does not underflow the 0 mark
+    printf ("stop_time.tv_sec = %d, stop_time.tv_nsec = %ld\n", stop_time.tv_sec, stop_time.tv_nsec);
   }
   
   close_pid_stat (fp);
