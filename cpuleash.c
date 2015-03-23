@@ -4,7 +4,9 @@
 //                        and the sample time is t. Then when we sleep in the loop for s seconds and then
 //                        we again sleep for t seconds in the main loop making the sample interval s + t
 //                        needs to be checked.
+// TODO: Before exitting this program, we need to make sure to leave all the processes in running state
 // TODO: See clock_nanosleep for better implementation possibility
+// TODO: If, for example an application is running in 40% and leash is given a target of 60%, how it will handle it ?
 // TODO: handle multi threaded application
 // TODO: Handle process group capping
 // TODO: Maybe thermal capping in future
@@ -247,6 +249,13 @@ long get_clk_tck_per_sec (void)
   return sysconf (_SC_CLK_TCK);
 }
 
+/* NOTE: Returning number of online cpus. Not the number of configures cpus */
+long get_cpu_cores (void)
+{
+  return sysconf (_SC_NPROCESSORS_ONLN);
+  /*sysconf (_SC_NPROCESSORS_CONF); */
+}
+
 
 struct timespec nsec_to_timespec (long int nsec)
 {
@@ -263,18 +272,38 @@ long int timespec_to_nsec (struct timespec temp)
   return temp.tv_sec * NANO_MULT + temp.tv_nsec;
 }
 
+/* TODO: Group control: Write a new function
+ * Make seperate function to fetch the cpu cycle usage for each process (maybe kep the
+ * file open, and pass it as an argument). Then write a group control function which 
+ * will scale the percentage for each of the processes in the group according to the
+ * weightages assigned and then call the 'leash_cpu' function.
+ */
 
 #define SAMPLE_NSEC (1 * NANO_MULT)
 /* NOTE: WORKS IN SINGLE THREADED APPLICATION */
-void leash_cpu (int pid, double percent)
+/* The 'overall_percent_flag' indicates if the percent is to be calculated
+ * with respect to the overall number cpus in the system or percent per core
+ * For example if we need to cap to 20% with 4 threads running then with
+ * overall core being set to 1 will cap it at 80% that is 20% of 400%
+ */
+void leash_cpu (int pid, double percent, int overall_percent_flag)
 {
   int take_child_flag = 0, stop_flag = 0;
   pid_stat_t new_pid_stat, old_pid_stat;
   FILE *fp;
-  long int old_util, new_util, delta_util, adjustment, target_clk_delta, hz, adjustment_stop_time, temp, target_nsec;
+  long int old_util, new_util, delta_util, adjustment, target_clk_delta, hz, adjustment_stop_time, temp, target_nsec, nlcores;
   struct timespec stop_time, stop_time_base, remaining_sleep_time, sample_time;
   
-  hz = get_clk_tck_per_sec ();
+  hz      = get_clk_tck_per_sec ();
+  nlcores = get_cpu_cores ();
+
+  /* simply scale the percent with respect to the number of live cores. */
+  /* NOTE: Equal capping for each thread. */
+  if (overall_percent_flag)
+  {
+    /* FIXME: Does this work well for all conditions? when we need per core capping? */
+    percent = percent / nlcores;
+  }
   
   stop_flag = 0;
 
@@ -434,7 +463,7 @@ void get_pid_cpu_util (FILE *fp)
 
 int main (int argc, char *argv[])
 {
-  int pid;
+  int pid, overall_percent_flag;
   double percent;
 
   if (argc <  2)
@@ -445,11 +474,13 @@ int main (int argc, char *argv[])
 
   pid = atoi (argv[1]);
   percent = atof (argv[2]);
-
+  overall_percent_flag = atoi (argv[3]);
+  
   FILE *fp = open_pid_stat (pid);
   get_pid_cpu_util (fp);
   sleep (1);
   get_pid_cpu_util (fp);
+  
 
   if (!is_pid_running (pid))
   {
@@ -457,15 +488,9 @@ int main (int argc, char *argv[])
     exit (0);
   }
   set_signal_handler ();
-leash_cpu (pid, percent);
-/*
-  printf ("Sending SIGSTOP to PID = %d\n", pid);
-  kill (pid, SIGSTOP);
-  printf ("Sleeping for 5 seconds\n");
-  do_complete_nanosleep (5,5000);
-  printf ("Sending SIGCONT to PID = %d\n", pid);
-  kill (pid, SIGCONT);
-*/
+
+  leash_cpu (pid, percent, overall_percent_flag);
+
   return 0;
 }
 
