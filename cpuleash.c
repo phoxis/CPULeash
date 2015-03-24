@@ -7,10 +7,11 @@
 // TODO: Before exitting this program, we need to make sure to leave all the processes in running state
 // TODO: See clock_nanosleep for better implementation possibility
 // TODO: If, for example an application is running in 40% and leash is given a target of 60%, how it will handle it ?
-// TODO: handle multi threaded application
+// TODO: handle multi threaded application. DONE
 // TODO: Handle process group capping
 // TODO: Maybe thermal capping in future
 // TODO: Deamonize
+// TODO: Do not multi-thread now
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
@@ -22,11 +23,13 @@
 #include <time.h>
 #include <error.h>
 #include <errno.h>
+#include <limits.h>
 
 #define BUF_MAX 256
-#define DEBUG 1
+// #define DEBUG 1
 
-#define NANO_MULT 1000000000L
+#define NANO_MULT  1000000000L
+#define MICRO_MULT 1000000L
 
 typedef struct _pid_stat_t {
   int pid;
@@ -83,7 +86,7 @@ void usage (void)
 FILE *open_pid_stat (int pid)
 {
   FILE *fp;
-  char proc_path[256];
+  char proc_path[PATH_MAX];
   sprintf (proc_path, "/proc/%d/stat", pid);
   fp = fopen (proc_path, "r");
   return fp;
@@ -97,7 +100,7 @@ void close_pid_stat (FILE *fp)
 int is_pid_running (int pid)
 {
   DIR *dp;
-  char proc_path[256];
+  char proc_path[PATH_MAX];
   sprintf (proc_path, "/proc/%d/", pid);
 
   dp = opendir (proc_path);
@@ -112,6 +115,8 @@ int is_pid_running (int pid)
   return 1;
 }
 
+/*
+// Need this later
 void handler_sigint (int signal)
 {
   return;
@@ -132,6 +137,7 @@ int set_signal_handler (void)
   }
   return retval;
 }
+*/
 
 int do_complete_nanosleep (struct timespec sleeptime)
 {
@@ -141,7 +147,7 @@ int do_complete_nanosleep (struct timespec sleeptime)
   treq = sleeptime;  
 
   #ifdef DEBUG
-  printf ("nanosleeping %d sec, %ld nanosec\n", (int) sleeptime.tv_sec, sleeptime.tv_nsec);
+  fprintf (stdout, "nanosleeping %d sec, %ld nanosec\n", (int) sleeptime.tv_sec, sleeptime.tv_nsec);
   #endif
 
   do
@@ -149,24 +155,34 @@ int do_complete_nanosleep (struct timespec sleeptime)
     retval = nanosleep (&treq, &tret);
     if (retval == -1)
     {
-      if (errno == EINTR)
+      switch (errno)
       {
-        #ifdef DEBUG
-        printf ("[%d %ld], [%d %ld]\n", (int) treq.tv_sec, (long int) treq.tv_nsec, (int) tret.tv_sec, (long int) tret.tv_nsec);
-        #endif
+        case EINTR:
+          #ifdef DEBUG
+          error (0, errno, "Request: [%d %ld], Remain: [%d %ld]\n", (int) treq.tv_sec, (long int) treq.tv_nsec, (int) tret.tv_sec, (long int) tret.tv_nsec);
+          #endif
+          break;
+          
+        case EFAULT:
+          #ifdef DEBUG
+          error (0, errno, "Request: [%d %ld], Remain: [%d %ld]\n", (int) treq.tv_sec, (long int) treq.tv_nsec, (int) tret.tv_sec, (long int) tret.tv_nsec);
+          #endif
+          goto DO_COMPLETE_NANOSLEEP_OUT;
+          break;
+          
+        case EINVAL:
+          #ifdef DEBUG
+          error (0, errno, "Request: [%d %ld], Remain: [%d %ld]\n", (int) treq.tv_sec, (long int) treq.tv_nsec, (int) tret.tv_sec, (long int) tret.tv_nsec);
+          #endif
+          goto DO_COMPLETE_NANOSLEEP_OUT;
+          break;
       }
-      else
-      {
-        break;
-      }
-    }
-    else if (retval == 0)
-    {
-      break;
     }
     treq = tret; 
-  } while (1);
+  } while (retval == -1);
 
+  DO_COMPLETE_NANOSLEEP_OUT:
+  
   return retval;  
 }
 
@@ -256,7 +272,7 @@ long get_cpu_cores (void)
   /*sysconf (_SC_NPROCESSORS_CONF); */
 }
 
-
+/* Convert nano seconds to struct timespec */
 struct timespec nsec_to_timespec (long int nsec)
 {
   struct timespec temp;
@@ -267,9 +283,28 @@ struct timespec nsec_to_timespec (long int nsec)
   return temp;
 }
 
+/* Convert struct timespec to nano seconds */
 long int timespec_to_nsec (struct timespec temp)
 {
   return temp.tv_sec * NANO_MULT + temp.tv_nsec;
+}
+
+
+/* Convert micro seconds to struct timeval */
+struct timeval usec_to_timeval (long int usec)
+{
+  struct timeval temp;
+  
+  temp.tv_usec = usec % MICRO_MULT;
+  temp.tv_sec  = usec / MICRO_MULT;
+  
+  return temp;
+}
+
+/* Convert timeval to micro seconds */
+long int timeval_to_usec (struct timeval temp)
+{
+  return temp.tv_sec * MICRO_MULT + temp.tv_usec;
 }
 
 /* TODO: Group control: Write a new function
@@ -391,39 +426,72 @@ void leash_cpu (int pid, double percent, int overall_percent_flag)
       #endif
     }
     // NOTE: Make sure timing does not overflow the sample time and does not underflow the 0 mark
+    #ifdef DEBUG
     printf ("stop_time.tv_sec = %d, stop_time.tv_nsec = %ld\n", stop_time.tv_sec, stop_time.tv_nsec);
+    #endif
   }
   
   close_pid_stat (fp);
 }
- 
 
 
-/* WARNING: TEST FUNCTION */
-void get_pid_cpu_util (FILE *fp)
+
+/* WARNING: WORK IN PROGRESS */
+/* FIXME: Sometimes utilization goes beyond 100% slightly when the monitored
+ * process is runnin in a tight while loop.
+ * TODO: Review code.
+ * NOTE: Doesn't seem to be used anywhere. I think better is to take a fixed 
+ * interval and sample instead of calling this after sleeping. This is because
+ * a 
+ *    loop
+ *      get_pid_cpu_util ();
+ *      sleep ();
+ * may be problematic as if the sleep is 1 sec then the processing will add up
+ * to the time to 1.x seconds. Where x is a very low value. We can do a correction
+ * but it will be an overhead.
+ */
+#define LFLG_OVERALL_CPU_PERCENT 0x01
+#define LFLG_RESET_CPU_ITER      0x02
+
+/* On first call or when flags is set to LFLG_RESET_CPU_ITER this function
+ * will return -1. This function is a utility to use in other functions
+ */
+double get_pid_cpu_util (FILE *fp, unsigned int flags)
 {
   static int iter = 0;
+  static struct timeval last_time, this_time;
   static pid_stat_t old_pid_stat, new_pid_stat;
   unsigned long int total_old_time, total_new_time, delta_time;
   double cpu_util = -1, running_secs; /* TODO: check for overflow */
   long int uptime, idletime;
-  int take_child_time_flag = 1, sample_time_sec = 2; /* TODO: This needs to be in centralized configuration */
+  int take_child_time_flag = 1, retval;
   FILE *uptime_fp;
-  long int hz;
-  struct timespec sample_time;
-  sample_time.tv_sec = sample_time_sec;
-  sample_time.tv_nsec = 0;
-
-
+  long int hz, nlcores;
   
-  fflush (fp);
+  if (flags & LFLG_RESET_CPU_ITER)
+  {
+    iter = 0;
+  }
+  
+  hz        = get_clk_tck_per_sec ();
+  nlcores   = get_cpu_cores ();
+  uptime_fp = open_uptime_file ();
+  read_uptime_fields (uptime_fp, &uptime, &idletime);
+
   read_pid_stat_fields (fp, &new_pid_stat);
+  retval = gettimeofday (&this_time, NULL);
+  if (retval != 0)
+  {
+    fprintf (stderr, "Problem calling \'gettimeofday\'\n");
+    return cpu_util;
+  }
+  /* If this is the first time then just initialize */
   if (iter == 0)
   {
     old_pid_stat = new_pid_stat;
-    do_complete_nanosleep (sample_time); /* Need to make this sleep configurable */
-    fflush (fp);
-    read_pid_stat_fields (fp, &new_pid_stat);
+    last_time = this_time;
+    iter++;
+    return cpu_util;
   }
 
   total_new_time = new_pid_stat.utime + new_pid_stat.stime;
@@ -437,16 +505,12 @@ void get_pid_cpu_util (FILE *fp)
 
   delta_time = (total_new_time - total_old_time);
 
-  hz = get_clk_tck_per_sec ();
-  uptime_fp = open_uptime_file ();
-  read_uptime_fields (uptime_fp, &uptime, &idletime);
-  
-  // FIXME: Here we need to know after how long this function was again called in the
-  // context of one specific pid. Else we need some other way to get the cpu utilization
-  // We do not want to divide it with sample_time_sec
   running_secs = uptime - (new_pid_stat.starttime / (double) hz);
-//  cpu_util = 100.0 * ((total_new_time / (double) hz) / running_secs);
-  cpu_util = 100.0 * (delta_time / ((double) hz * sample_time_sec));
+  cpu_util = 100.0 * (delta_time / ((double) hz * ((timeval_to_usec (this_time) - timeval_to_usec (last_time)) / (double) MICRO_MULT)));
+  if (flags & LFLG_OVERALL_CPU_PERCENT)
+  {
+    cpu_util = cpu_util / (double) nlcores;
+  }
 
   #ifdef DEBUG
   printf ("old_utime: %lu, old_stime: %lu, old_cutime: %lu, old_cstime: %lu\n", 
@@ -458,7 +522,27 @@ void get_pid_cpu_util (FILE *fp)
   #endif
 
   old_pid_stat = new_pid_stat;
+  last_time  = this_time;
   iter++;
+  
+  return cpu_util;
+}
+
+/* WARNING: DEMO FUNCTION */
+void print_cpu_util (pid_t pid, long int interval)
+{
+  FILE *fp = open_pid_stat (pid);
+  if (fp == NULL)
+  {
+    error (0, errno, "Error");
+    return;
+  }
+  
+  while (1)
+  {
+    printf ("%.2f\n", get_pid_cpu_util (fp, 1));
+    sleep (interval);
+  }
 }
 
 int main (int argc, char *argv[])
@@ -475,19 +559,13 @@ int main (int argc, char *argv[])
   pid = atoi (argv[1]);
   percent = atof (argv[2]);
   overall_percent_flag = atoi (argv[3]);
-  
-  FILE *fp = open_pid_stat (pid);
-  get_pid_cpu_util (fp);
-  sleep (1);
-  get_pid_cpu_util (fp);
-  
 
   if (!is_pid_running (pid))
   {
     printf ("PID = %d is not running\n", pid);
     exit (0);
   }
-  set_signal_handler ();
+//   set_signal_handler ();
 
   leash_cpu (pid, percent, overall_percent_flag);
 
