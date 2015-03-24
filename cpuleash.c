@@ -31,6 +31,10 @@
 #define NANO_MULT  1000000000L
 #define MICRO_MULT 1000000L
 
+#define LFLG_OVERALL_CPU_PERCENT 0x01
+#define LFLG_RESET_CPU_ITER      0x02
+#define LFLG_SET_SAMPLE_TIME     0x04
+
 typedef struct _pid_stat_t {
   int pid;
   char comm[BUF_MAX];
@@ -315,13 +319,13 @@ long int timeval_to_usec (struct timeval temp)
  */
 
 #define SAMPLE_NSEC (1 * NANO_MULT)
-/* NOTE: WORKS IN SINGLE THREADED APPLICATION */
-/* The 'overall_percent_flag' indicates if the percent is to be calculated
- * with respect to the overall number cpus in the system or percent per core
- * For example if we need to cap to 20% with 4 threads running then with
- * overall core being set to 1 will cap it at 80% that is 20% of 400%
+/* NOTE: WORKS GOOD */
+/* The 'flags' indicates different configurations. Like if the percent is to be calculated
+ * with respect to the overall number cpus in the system or percent per core then use 
+ * LFLG_OVERALL_CPU_PERCENT. For example if we need to cap to 20% with 4 threads running 
+ * then with overall core being set to 1 will cap it at 80% that is 20% of 400%
  */
-void leash_cpu (int pid, double percent, int overall_percent_flag)
+void leash_cpu (int pid, double percent, struct timespec *user_sample_time, int flags)
 {
   int take_child_flag = 0, stop_flag = 0;
   pid_stat_t new_pid_stat, old_pid_stat;
@@ -333,16 +337,24 @@ void leash_cpu (int pid, double percent, int overall_percent_flag)
   nlcores = get_cpu_cores ();
 
   /* simply scale the percent with respect to the number of live cores. */
-  /* NOTE: Equal capping for each thread. */
-  if (overall_percent_flag)
+  /* Equal capping for each thread. */
+  if (flags & LFLG_OVERALL_CPU_PERCENT)
   {
     /* FIXME: Does this work well for all conditions? when we need per core capping? */
     percent = percent / nlcores;
   }
   
   stop_flag = 0;
-
-  sample_time = nsec_to_timespec (SAMPLE_NSEC);
+  /* If the caller wants to set sample time, we se it, else it is set to default */
+  if ((flags & LFLG_SET_SAMPLE_TIME) && (user_sample_time != NULL))
+  {
+    if (
+    sample_time = *user_sample_time
+  }
+  else
+  {
+    sample_time = nsec_to_timespec (SAMPLE_NSEC);
+  }
   
   target_nsec      = (long int) ((percent / 100.0) * timespec_to_nsec (sample_time));
   target_clk_delta = (long int) ceill ((target_nsec / (long double) NANO_MULT) * hz);
@@ -450,8 +462,6 @@ void leash_cpu (int pid, double percent, int overall_percent_flag)
  * to the time to 1.x seconds. Where x is a very low value. We can do a correction
  * but it will be an overhead.
  */
-#define LFLG_OVERALL_CPU_PERCENT 0x01
-#define LFLG_RESET_CPU_ITER      0x02
 
 /* On first call or when flags is set to LFLG_RESET_CPU_ITER this function
  * will return -1. This function is a utility to use in other functions
@@ -549,6 +559,7 @@ int main (int argc, char *argv[])
 {
   int pid, overall_percent_flag;
   double percent;
+  unsigned int flags = 0x00;
 
   if (argc <  2)
   {
@@ -560,6 +571,11 @@ int main (int argc, char *argv[])
   percent = atof (argv[2]);
   overall_percent_flag = atoi (argv[3]);
 
+  if (overall_percent_flag == 1)
+  {
+    flags |= LFLG_OVERALL_CPU_PERCENT;
+  }
+  
   if (!is_pid_running (pid))
   {
     printf ("PID = %d is not running\n", pid);
@@ -567,7 +583,7 @@ int main (int argc, char *argv[])
   }
 //   set_signal_handler ();
 
-  leash_cpu (pid, percent, overall_percent_flag);
+  leash_cpu (pid, percent, flags);
 
   return 0;
 }
