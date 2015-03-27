@@ -1,17 +1,3 @@
-// Challenges:
-// Compute the amount of sleep required for each pid
-// What should be the sample time within which the cpu utilization should be taken
-//                        and the sample time is t. Then when we sleep in the loop for s seconds and then
-//                        we again sleep for t seconds in the main loop making the sample interval s + t
-//                        needs to be checked.
-// TODO: Before exitting this program, we need to make sure to leave all the processes in running state
-// TODO: See clock_nanosleep for better implementation possibility
-// TODO: If, for example an application is running in 40% and leash is given a target of 60%, how it will handle it ?
-// TODO: handle multi threaded application. DONE
-// TODO: Handle process group capping
-// TODO: Maybe thermal capping in future
-// TODO: Deamonize
-// TODO: Do not multi-thread now
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
@@ -19,8 +5,10 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <time.h>
+#include <sys/time.h>
 #include <error.h>
 #include <errno.h>
 #include <limits.h>
@@ -82,6 +70,9 @@ typedef struct _pid_stat_t {
   unsigned long int cguest_time;
 } pid_stat_t;
 
+volatile sig_atomic_t sig_flag = 0;
+sigjmp_buf jmp_env;
+
 void usage (void)
 {
   printf ("Enter a pid and percentage to cap\n");
@@ -119,10 +110,15 @@ int is_pid_running (int pid)
   return 1;
 }
 
-/*
+
 // Need this later
 void handler_sigint (int signal)
 {
+  if (signal == SIGINT)
+  {
+    sig_flag = 1;
+    siglongjmp (jmp_env, 1);
+  }
   return;
 }
 
@@ -141,7 +137,7 @@ int set_signal_handler (void)
   }
   return retval;
 }
-*/
+
 
 int do_complete_nanosleep (struct timespec sleeptime)
 {
@@ -330,7 +326,7 @@ void leash_cpu (int pid, double percent, struct timespec *user_sample_time, int 
   int take_child_flag = 0, stop_flag = 0;
   pid_stat_t new_pid_stat, old_pid_stat;
   FILE *fp;
-  long int old_util, new_util, delta_util, adjustment, target_clk_delta, hz, adjustment_stop_time, temp, target_nsec, nlcores;
+  long int old_util, new_util, delta_util, adjustment, target_clk_delta, hz, adjustment_stop_time, target_nsec, nlcores;
   struct timespec stop_time, stop_time_base, remaining_sleep_time, sample_time;
   
   hz      = get_clk_tck_per_sec ();
@@ -348,8 +344,7 @@ void leash_cpu (int pid, double percent, struct timespec *user_sample_time, int 
   /* If the caller wants to set sample time, we se it, else it is set to default */
   if ((flags & LFLG_SET_SAMPLE_TIME) && (user_sample_time != NULL))
   {
-    if (
-    sample_time = *user_sample_time
+    sample_time = *user_sample_time;
   }
   else
   {
@@ -446,22 +441,12 @@ void leash_cpu (int pid, double percent, struct timespec *user_sample_time, int 
   close_pid_stat (fp);
 }
 
+/* Sent SIGCONT to pid. This is done before exitting */
+void do_cleanup (pid_t pid)
+{
+  kill (pid, SIGCONT);
+}
 
-
-/* WARNING: WORK IN PROGRESS */
-/* FIXME: Sometimes utilization goes beyond 100% slightly when the monitored
- * process is runnin in a tight while loop.
- * TODO: Review code.
- * NOTE: Doesn't seem to be used anywhere. I think better is to take a fixed 
- * interval and sample instead of calling this after sleeping. This is because
- * a 
- *    loop
- *      get_pid_cpu_util ();
- *      sleep ();
- * may be problematic as if the sleep is 1 sec then the processing will add up
- * to the time to 1.x seconds. Where x is a very low value. We can do a correction
- * but it will be an overhead.
- */
 
 /* On first call or when flags is set to LFLG_RESET_CPU_ITER this function
  * will return -1. This function is a utility to use in other functions
@@ -472,7 +457,8 @@ double get_pid_cpu_util (FILE *fp, unsigned int flags)
   static struct timeval last_time, this_time;
   static pid_stat_t old_pid_stat, new_pid_stat;
   unsigned long int total_old_time, total_new_time, delta_time;
-  double cpu_util = -1, running_secs; /* TODO: check for overflow */
+  double cpu_util = -1; /* NOTE: check for overflow */
+//   double running_secs;
   long int uptime, idletime;
   int take_child_time_flag = 1, retval;
   FILE *uptime_fp;
@@ -515,7 +501,7 @@ double get_pid_cpu_util (FILE *fp, unsigned int flags)
 
   delta_time = (total_new_time - total_old_time);
 
-  running_secs = uptime - (new_pid_stat.starttime / (double) hz);
+//   running_secs = uptime - (new_pid_stat.starttime / (double) hz);
   cpu_util = 100.0 * (delta_time / ((double) hz * ((timeval_to_usec (this_time) - timeval_to_usec (last_time)) / (double) MICRO_MULT)));
   if (flags & LFLG_OVERALL_CPU_PERCENT)
   {
@@ -538,7 +524,7 @@ double get_pid_cpu_util (FILE *fp, unsigned int flags)
   return cpu_util;
 }
 
-/* WARNING: DEMO FUNCTION */
+/* NOTE: Demo */
 void print_cpu_util (pid_t pid, long int interval)
 {
   FILE *fp = open_pid_stat (pid);
@@ -561,7 +547,7 @@ int main (int argc, char *argv[])
   double percent;
   unsigned int flags = 0x00;
 
-  if (argc <  2)
+  if (argc <  3)
   {
     usage ();
     exit (0);
@@ -569,7 +555,15 @@ int main (int argc, char *argv[])
 
   pid = atoi (argv[1]);
   percent = atof (argv[2]);
-  overall_percent_flag = atoi (argv[3]);
+  if (argc == 4)
+  {
+    overall_percent_flag = atoi (argv[3]);
+    overall_percent_flag = (overall_percent_flag != 0); /* 0 or 1 */
+  }
+  else
+  {
+    overall_percent_flag = 1;
+  }
 
   if (overall_percent_flag == 1)
   {
@@ -581,9 +575,18 @@ int main (int argc, char *argv[])
     printf ("PID = %d is not running\n", pid);
     exit (0);
   }
-//   set_signal_handler ();
-
-  leash_cpu (pid, percent, flags);
+  
+  set_signal_handler ();
+  
+  sigsetjmp (jmp_env, 1);
+  if (!sig_flag)
+  {
+    leash_cpu (pid, percent, NULL, flags);
+  }
+  else
+  {
+    do_cleanup (pid);
+  }
 
   return 0;
 }
