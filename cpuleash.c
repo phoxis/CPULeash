@@ -13,7 +13,6 @@
 #include <errno.h>
 #include <limits.h>
 
-/* TODO: We need to average out the cpu util instead of taking only between one sample to make the value stable */
 #define BUF_MAX 256
 // #define DEBUG 1
 
@@ -113,7 +112,6 @@ int is_pid_running (int pid)
 }
 
 
-// Need this later
 void handler_sigint (int signal)
 {
   if (signal == SIGINT)
@@ -148,8 +146,8 @@ int do_complete_nanosleep (struct timespec sleeptime)
 
   treq = sleeptime;  
 
-  #ifdef DEBUG
-//   fprintf (stdout, "nanosleeping %d sec, %ld nanosec\n", (int) sleeptime.tv_sec, sleeptime.tv_nsec);
+  #if DEBUG==1
+  fprintf (stdout, "nanosleeping %d sec, %ld nanosec\n", (int) sleeptime.tv_sec, sleeptime.tv_nsec);
   #endif
 
   do
@@ -160,20 +158,20 @@ int do_complete_nanosleep (struct timespec sleeptime)
       switch (errno)
       {
         case EINTR:
-          #ifdef DEBUG
+          #if DEBUG==1
           error (0, errno, "Request: [%d %ld], Remain: [%d %ld]\n", (int) treq.tv_sec, (long int) treq.tv_nsec, (int) tret.tv_sec, (long int) tret.tv_nsec);
           #endif
           break;
           
         case EFAULT:
-          #ifdef DEBUG
+          #if DEBUG==1
           error (0, errno, "Request: [%d %ld], Remain: [%d %ld]\n", (int) treq.tv_sec, (long int) treq.tv_nsec, (int) tret.tv_sec, (long int) tret.tv_nsec);
           #endif
           goto DO_COMPLETE_NANOSLEEP_OUT;
           break;
           
         case EINVAL:
-          #ifdef DEBUG
+          #if DEBUG==1
           error (0, errno, "Request: [%d %ld], Remain: [%d %ld]\n", (int) treq.tv_sec, (long int) treq.tv_nsec, (int) tret.tv_sec, (long int) tret.tv_nsec);
           #endif
           goto DO_COMPLETE_NANOSLEEP_OUT;
@@ -191,7 +189,7 @@ int do_complete_nanosleep (struct timespec sleeptime)
 /* Get fields, 14, 15, 16, 17 here. We need to call flush in this
  * function or before calling in order to read the updated values
  */
-int read_pid_stat_fields (FILE *fp, pid_stat_t *stat_struct)
+static int read_pid_stat_fields (FILE *fp, pid_stat_t *stat_struct)
 {
   char buffer[BUF_MAX];
 
@@ -218,18 +216,18 @@ int read_pid_stat_fields (FILE *fp, pid_stat_t *stat_struct)
   return 1;
 }
 
-FILE *open_uptime_file (void)
+static FILE *open_uptime_file (void)
 {
   FILE *fp = fopen ("/proc/uptime", "r");
   return fp;
 }
 
-void close_uptime_file (FILE *fp)
+static void close_uptime_file (FILE *fp)
 {
   fclose (fp);
 }
 
-void read_uptime_fields (FILE *fp, long int *uptime, long int *idle)
+static void read_uptime_fields (FILE *fp, long int *uptime, long int *idle)
 {
   fflush (fp);
   fseek (fp, 0, SEEK_SET);
@@ -237,7 +235,8 @@ void read_uptime_fields (FILE *fp, long int *uptime, long int *idle)
   return;
 }
 
-#ifdef DEBUG
+
+/* TEST */
 void read_pid_stats_test (int pid)
 {
   FILE *fp;
@@ -260,7 +259,7 @@ void read_pid_stats_test (int pid)
          );
   close_pid_stat (fp);
 }
-#endif
+
 
 long get_clk_tck_per_sec (void)
 {
@@ -401,13 +400,13 @@ double get_pid_cpu_util (FILE *fp, unsigned int flags)
     cpu_util = cpu_util / (double) nlcores;
   }
 
-  #ifdef DEBUG
-//   printf ("old_utime: %lu, old_stime: %lu, old_cutime: %lu, old_cstime: %lu\n", 
-//           old_pid_stat.utime, old_pid_stat.stime, old_pid_stat.cutime, old_pid_stat.cstime);
-//   printf ("new_utime: %lu, new_stime: %lu, new_cutime: %lu, new_cstime: %lu\n",
-//           new_pid_stat.utime, new_pid_stat.stime, new_pid_stat.cutime, new_pid_stat.cstime);
-//   printf ("delta_time: %lu\n", delta_time);
-//   printf ("cpu_util: %lf%%\n", cpu_util);
+  #if DEBUG==1
+  printf ("old_utime: %lu, old_stime: %lu, old_cutime: %lu, old_cstime: %lu\n", 
+          old_pid_stat.utime, old_pid_stat.stime, old_pid_stat.cutime, old_pid_stat.cstime);
+  printf ("new_utime: %lu, new_stime: %lu, new_cutime: %lu, new_cstime: %lu\n",
+          new_pid_stat.utime, new_pid_stat.stime, new_pid_stat.cutime, new_pid_stat.cstime);
+  printf ("delta_time: %lu\n", delta_time);
+  printf ("cpu_util: %lf%%\n", cpu_util);
   #endif
 
   old_pid_stat = new_pid_stat;
@@ -428,7 +427,7 @@ void leash_cpu (int pid, double frac, struct timespec *user_sample_time, int fla
   
   if ((flags & LFLG_SET_SAMPLE_TIME) && (user_sample_time != NULL))
   {
-    #ifdef DEBUG
+    #if DEBUG==1
     fprintf (stdout, "User specified sample time: %010ld\n", timespec_to_nsec (*user_sample_time));
     #endif
     sample_nsec = timespec_to_nsec (*user_sample_time);
@@ -444,7 +443,7 @@ void leash_cpu (int pid, double frac, struct timespec *user_sample_time, int fla
     dyn_ratio = dyn_ratio / util * frac;
     dyn_ratio = dyn_ratio > 1 ? 1 : dyn_ratio;
     
-    run_time_nsec = dyn_ratio * SAMPLE_NSEC;
+    run_time_nsec = dyn_ratio * sample_nsec;
     stop_time_nsec  = sample_nsec - run_time_nsec;
     
     stop_time = nsec_to_timespec (stop_time_nsec);
@@ -461,7 +460,7 @@ void leash_cpu (int pid, double frac, struct timespec *user_sample_time, int fla
     
     if (stop_time_nsec > 0)
     {
-      // TODO: Check if th pid exists
+      // TODO: Check if tht pid exists
       kill (pid, SIGSTOP);
       do_complete_nanosleep (stop_time);
       kill (pid, SIGCONT);
@@ -523,7 +522,7 @@ int main (int argc, char *argv[])
     flags |= LFLG_OVERALL_CPU_PERCENT;
   }
   flags |= (LFLG_VERBOSE | LFLG_SET_SAMPLE_TIME);
-  user_sample_time = nsec_to_timespec (SAMPLE_NSEC);
+  user_sample_time = nsec_to_timespec (SAMPLE_NSEC/2.0);
   
   if (!is_pid_running (pid))
   {
