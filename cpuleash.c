@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <limits.h>
 
+/* TODO: We need to average out the cpu util instead of taking only between one sample to make the value stable */
 #define BUF_MAX 256
 // #define DEBUG 1
 
@@ -22,6 +23,7 @@
 #define LFLG_OVERALL_CPU_PERCENT 0x01
 #define LFLG_RESET_CPU_ITER      0x02
 #define LFLG_SET_SAMPLE_TIME     0x04
+#define LFLG_VERBOSE             0x10
 
 typedef struct _pid_stat_t {
   int pid;
@@ -147,7 +149,7 @@ int do_complete_nanosleep (struct timespec sleeptime)
   treq = sleeptime;  
 
   #ifdef DEBUG
-  fprintf (stdout, "nanosleeping %d sec, %ld nanosec\n", (int) sleeptime.tv_sec, sleeptime.tv_nsec);
+//   fprintf (stdout, "nanosleeping %d sec, %ld nanosec\n", (int) sleeptime.tv_sec, sleeptime.tv_nsec);
   #endif
 
   do
@@ -314,132 +316,23 @@ long int timeval_to_usec (struct timeval temp)
  * weightages assigned and then call the 'leash_cpu' function.
  */
 
-#define SAMPLE_NSEC (1 * NANO_MULT)
-/* NOTE: WORKS GOOD */
-/* The 'flags' indicates different configurations. Like if the percent is to be calculated
- * with respect to the overall number cpus in the system or percent per core then use 
- * LFLG_OVERALL_CPU_PERCENT. For example if we need to cap to 20% with 4 threads running 
- * then with overall core being set to 1 will cap it at 80% that is 20% of 400%
- */
-void leash_cpu (int pid, double percent, struct timespec *user_sample_time, int flags)
+long int get_cpu_clk (FILE *fp)
 {
-  int take_child_flag = 0, stop_flag = 0;
-  pid_stat_t new_pid_stat, old_pid_stat;
-  FILE *fp;
-  long int old_util, new_util, delta_util, adjustment, target_clk_delta, hz, adjustment_stop_time, target_nsec, nlcores;
-  struct timespec stop_time, stop_time_base, remaining_sleep_time, sample_time;
+  pid_stat_t pid_stat;
+  long int util = 0;
+  int take_child_flag = 0; /* TODO: Need to make configurable */
   
-  hz      = get_clk_tck_per_sec ();
-  nlcores = get_cpu_cores ();
-
-  /* simply scale the percent with respect to the number of live cores. */
-  /* Equal capping for each thread. */
-  if (flags & LFLG_OVERALL_CPU_PERCENT)
+  read_pid_stat_fields (fp, &pid_stat);
+  util = pid_stat.utime + pid_stat.stime;
+  if (take_child_flag == 1)
   {
-    /* FIXME: Does this work well for all conditions? when we need per core capping? */
-    percent = percent / nlcores;
+    util += pid_stat.cutime + pid_stat.cstime;
   }
   
-  stop_flag = 0;
-  /* If the caller wants to set sample time, we se it, else it is set to default */
-  if ((flags & LFLG_SET_SAMPLE_TIME) && (user_sample_time != NULL))
-  {
-    sample_time = *user_sample_time;
-  }
-  else
-  {
-    sample_time = nsec_to_timespec (SAMPLE_NSEC);
-  }
-  
-  target_nsec      = (long int) ((percent / 100.0) * timespec_to_nsec (sample_time));
-  target_clk_delta = (long int) ceill ((target_nsec / (long double) NANO_MULT) * hz);
-  stop_time        = nsec_to_timespec (timespec_to_nsec (sample_time) - target_nsec);
-
-  stop_time_base = stop_time;
-
-  fp = open_pid_stat (pid);
-  while (1)
-  {
-    /* Get current clock ticks */
-    read_pid_stat_fields (fp, &old_pid_stat);
-    old_util = old_pid_stat.utime + old_pid_stat.stime;
-    if (take_child_flag == 1)
-    {
-      old_util += old_pid_stat.cutime + old_pid_stat.cstime;
-    }
-
-    
-    if (stop_flag)
-    {
-      #ifdef DEBUG
-      printf ("Stopping pid = %d\n", pid);
-      #endif
-      /* Stop the process for desired seconds */
-      kill (pid, SIGSTOP);
-      do_complete_nanosleep (stop_time);
-      kill (pid, SIGCONT);
-
-      /* Compute the remaining time within the sample range */
-      remaining_sleep_time = nsec_to_timespec (timespec_to_nsec (sample_time) - timespec_to_nsec (stop_time));
-    }
-    else
-    {    
-      /* Compute the remaining time within the sample range */
-      do_complete_nanosleep (stop_time);
-      remaining_sleep_time = nsec_to_timespec (timespec_to_nsec (sample_time) - timespec_to_nsec (stop_time));
-    }
-    
-
-    #ifdef DEBUG
-    printf ("Sleeping remainder of sample interval\n");
-    printf ("sample_time.tv_sec = %d, sample_time.tv_nsec = %ld, stop_time.tv_sec = %d, stop_time.tv_nsec = %ld, remaining_sleep_time.tv_sec = %d, remaining_sleep_time.tv_nsec = %d\n", sample_time.tv_sec, sample_time.tv_nsec, stop_time.tv_sec, stop_time.tv_nsec, remaining_sleep_time.tv_sec, remaining_sleep_time.tv_nsec);
-    #endif
-
-    /* Sleep the remaining time to complete the sample interval */
-    do_complete_nanosleep (remaining_sleep_time);
-    
-    
-    /* Get current clock ticks */
-    read_pid_stat_fields (fp, &new_pid_stat);
-    new_util = new_pid_stat.utime + new_pid_stat.stime;
-    if (take_child_flag == 1)
-    {
-      new_util += new_pid_stat.cutime + new_pid_stat.cstime;
-    }
-    
-    delta_util           = new_util - old_util;
-    adjustment           = target_clk_delta - delta_util;
-    adjustment_stop_time = labs ((adjustment / (double) hz) * NANO_MULT); // target_clk_delta and delta_util is already scaled to sample_time
-
-    #ifdef DEBUG
-    printf ("ADJUST: %ld, clk = %ld\n", adjustment_stop_time, adjustment);  
-    printf ("delta_util = %ld, target_clk_delta = %ld\n", delta_util, target_clk_delta);
-    #endif
-
-    if (adjustment >= 0)
-    {
-      stop_flag = 1;
-      stop_time = nsec_to_timespec (timespec_to_nsec (stop_time_base) - adjustment_stop_time);
-      #ifdef DEBUG
-      printf ("--\n");
-      #endif
-    }
-    else
-    {
-      stop_flag = 1;
-      stop_time = nsec_to_timespec (timespec_to_nsec (stop_time_base) + adjustment_stop_time);
-      #ifdef DEBUG
-      printf ("++\n");
-      #endif
-    }
-    // NOTE: Make sure timing does not overflow the sample time and does not underflow the 0 mark
-    #ifdef DEBUG
-    printf ("stop_time.tv_sec = %d, stop_time.tv_nsec = %ld\n", stop_time.tv_sec, stop_time.tv_nsec);
-    #endif
-  }
-  
-  close_pid_stat (fp);
+  return util;
 }
+
+#define SAMPLE_NSEC (1.0 * NANO_MULT)
 
 /* Sent SIGCONT to pid. This is done before exitting */
 void do_cleanup (pid_t pid)
@@ -502,19 +395,19 @@ double get_pid_cpu_util (FILE *fp, unsigned int flags)
   delta_time = (total_new_time - total_old_time);
 
 //   running_secs = uptime - (new_pid_stat.starttime / (double) hz);
-  cpu_util = 100.0 * (delta_time / ((double) hz * ((timeval_to_usec (this_time) - timeval_to_usec (last_time)) / (double) MICRO_MULT)));
+  cpu_util = 1.0 * (delta_time / ((double) hz * ((timeval_to_usec (this_time) - timeval_to_usec (last_time)) / (double) MICRO_MULT)));
   if (flags & LFLG_OVERALL_CPU_PERCENT)
   {
     cpu_util = cpu_util / (double) nlcores;
   }
 
   #ifdef DEBUG
-  printf ("old_utime: %lu, old_stime: %lu, old_cutime: %lu, old_cstime: %lu\n", 
-          old_pid_stat.utime, old_pid_stat.stime, old_pid_stat.cutime, old_pid_stat.cstime);
-  printf ("new_utime: %lu, new_stime: %lu, new_cutime: %lu, new_cstime: %lu\n",
-          new_pid_stat.utime, new_pid_stat.stime, new_pid_stat.cutime, new_pid_stat.cstime);
-  printf ("delta_time: %lu\n", delta_time);
-  printf ("cpu_util: %lf%%\n", cpu_util);
+//   printf ("old_utime: %lu, old_stime: %lu, old_cutime: %lu, old_cstime: %lu\n", 
+//           old_pid_stat.utime, old_pid_stat.stime, old_pid_stat.cutime, old_pid_stat.cstime);
+//   printf ("new_utime: %lu, new_stime: %lu, new_cutime: %lu, new_cstime: %lu\n",
+//           new_pid_stat.utime, new_pid_stat.stime, new_pid_stat.cutime, new_pid_stat.cstime);
+//   printf ("delta_time: %lu\n", delta_time);
+//   printf ("cpu_util: %lf%%\n", cpu_util);
   #endif
 
   old_pid_stat = new_pid_stat;
@@ -522,6 +415,65 @@ double get_pid_cpu_util (FILE *fp, unsigned int flags)
   iter++;
   
   return cpu_util;
+}
+
+void leash_cpu (int pid, double frac, struct timespec *user_sample_time, int flags)
+{
+  FILE *fp;
+  double util, dyn_ratio;
+  long int stop_time_nsec, run_time_nsec;
+  struct timespec stop_time, run_time;
+  int count = 0;
+  long int sample_nsec = SAMPLE_NSEC;
+  
+  if ((flags & LFLG_SET_SAMPLE_TIME) && (user_sample_time != NULL))
+  {
+    #ifdef DEBUG
+    fprintf (stdout, "User specified sample time: %010ld\n", timespec_to_nsec (*user_sample_time));
+    #endif
+    sample_nsec = timespec_to_nsec (*user_sample_time);
+  }
+  
+  fp = open_pid_stat (pid);
+  
+  dyn_ratio = frac;
+  (void) get_pid_cpu_util (fp, LFLG_RESET_CPU_ITER);
+  util = frac;
+  while (1)
+  {
+    dyn_ratio = dyn_ratio / util * frac;
+    dyn_ratio = dyn_ratio > 1 ? 1 : dyn_ratio;
+    
+    run_time_nsec = dyn_ratio * SAMPLE_NSEC;
+    stop_time_nsec  = sample_nsec - run_time_nsec;
+    
+    stop_time = nsec_to_timespec (stop_time_nsec);
+    run_time = nsec_to_timespec (run_time_nsec);
+    
+    if (flags & LFLG_VERBOSE)
+    {
+      if (count % 24 == 0)
+      {
+        printf ("frac\tutil\tdyn_ratio\t\tstop\t\trun\n");
+      }
+      printf ("%0.2f\t%0.2f\t%0.2f\t\t%010ld\t\t%010ld\n", frac, util, dyn_ratio, stop_time_nsec, run_time_nsec);
+    }
+    
+    if (stop_time_nsec > 0)
+    {
+      // TODO: Check if th pid exists
+      kill (pid, SIGSTOP);
+      do_complete_nanosleep (stop_time);
+      kill (pid, SIGCONT);
+    }
+    do_complete_nanosleep (run_time);
+    
+    
+    util = get_pid_cpu_util (fp, LFLG_OVERALL_CPU_PERCENT);
+    count++;
+  }
+  
+  close_pid_stat (fp);
 }
 
 /* NOTE: Demo */
@@ -544,8 +496,9 @@ void print_cpu_util (pid_t pid, long int interval)
 int main (int argc, char *argv[])
 {
   int pid, overall_percent_flag;
-  double percent;
+  double percent, frac;
   unsigned int flags = 0x00;
+  struct timespec user_sample_time;
 
   if (argc <  3)
   {
@@ -569,6 +522,8 @@ int main (int argc, char *argv[])
   {
     flags |= LFLG_OVERALL_CPU_PERCENT;
   }
+  flags |= (LFLG_VERBOSE | LFLG_SET_SAMPLE_TIME);
+  user_sample_time = nsec_to_timespec (SAMPLE_NSEC);
   
   if (!is_pid_running (pid))
   {
@@ -578,10 +533,12 @@ int main (int argc, char *argv[])
   
   set_signal_handler ();
   
+  frac = percent / 100.0;
+  
   sigsetjmp (jmp_env, 1);
   if (!sig_flag)
   {
-    leash_cpu (pid, percent, NULL, flags);
+    leash_cpu (pid, frac, &user_sample_time, flags);
   }
   else
   {
