@@ -13,73 +13,30 @@
 #include <errno.h>
 #include <limits.h>
 
-#define BUF_MAX 256
-// #define DEBUG 1
+#include "cpuleash.h"
 
-#define NANO_MULT  1000000000L
-#define MICRO_MULT 1000000L
+static FILE *open_pid_stat (int pid);
+static void close_pid_stat (FILE *fp);
+static void handler_sigint (int signal);
+static int set_signal_handler (void);
+static int do_complete_nanosleep (struct timespec sleeptime);
+static int read_pid_stat_fields (FILE *fp, pid_stat_t *stat_struct);
+static FILE *open_uptime_file (void);
+static void close_uptime_file (FILE *fp);
+static void read_uptime_fields (FILE *fp, long int *uptime, long int *idle);
+// static void read_pid_stats_test (int pid);
+// static long int get_cpu_clk (FILE *fp);
+static void do_cleanup (pid_t pid);
+long int get_cpu_clk (FILE *fp);
+double get_pid_cpu_util (pid_t pid, unsigned int flags);
 
-#define LFLG_OVERALL_CPU_PERCENT 0x01
-#define LFLG_RESET_CPU_ITER      0x02
-#define LFLG_SET_SAMPLE_TIME     0x04
-#define LFLG_VERBOSE             0x10
 
-typedef struct _pid_stat_t {
-  int pid;
-  char comm[BUF_MAX];
-  char state;
-  int ppid;
-  int pgrp;
-  int session;
-  int tty_nr;
-  int tpgid;
-  unsigned int flags;
-  unsigned long int minflt;
-  unsigned long int cminflt;
-  unsigned long int majflt;
-  unsigned long int cmajflt;
-  unsigned long int utime;
-  unsigned long int stime;
-  unsigned long int cutime;
-  unsigned long int cstime;
-  unsigned long int priority;
-  unsigned long int nice;
-  unsigned long int num_threads;
-  unsigned long int itrealvalue;
-  unsigned long long int starttime;
-  unsigned long int vsize;
-  long int rss;
-  unsigned long int rsslim;
-  unsigned long int startcode;
-  unsigned long int endcode;
-  unsigned long int startstack;
-  unsigned long int kstkesp;
-  unsigned long int kstkeip;
-  unsigned long int signal;
-  unsigned long int blocked;
-  unsigned long int sigignore;
-  unsigned long int sigcatch;
-  unsigned long int wchan;
-  unsigned long int nswap;
-  unsigned long int cnswap;
-  int exit_signal;
-  int processor;
-  unsigned int rt_priority;
-  unsigned int policy;
-  unsigned long long int delayacct_blkio_ticks;
-  unsigned long int guest_time;
-  unsigned long int cguest_time;
-} pid_stat_t;
+static volatile sig_atomic_t sig_flag = 0;
+static sigjmp_buf jmp_env;
 
-volatile sig_atomic_t sig_flag = 0;
-sigjmp_buf jmp_env;
+/* Static functions */
 
-void usage (void)
-{
-  printf ("Enter a pid and percentage to cap\n");
-}
-
-FILE *open_pid_stat (int pid)
+static FILE *open_pid_stat (int pid)
 {
   FILE *fp;
   char proc_path[PATH_MAX];
@@ -88,7 +45,7 @@ FILE *open_pid_stat (int pid)
   return fp;
 }
 
-void close_pid_stat (FILE *fp)
+static void close_pid_stat (FILE *fp)
 {
   fclose (fp);
 }
@@ -111,8 +68,7 @@ int is_pid_running (int pid)
   return 1;
 }
 
-
-void handler_sigint (int signal)
+static void handler_sigint (int signal)
 {
   if (signal == SIGINT)
   {
@@ -122,7 +78,7 @@ void handler_sigint (int signal)
   return;
 }
 
-int set_signal_handler (void)
+static int set_signal_handler (void)
 {
   struct sigaction sa;
   int retval;
@@ -138,8 +94,7 @@ int set_signal_handler (void)
   return retval;
 }
 
-
-int do_complete_nanosleep (struct timespec sleeptime)
+static int do_complete_nanosleep (struct timespec sleeptime)
 {
   struct timespec treq, tret;
   int retval = 0;
@@ -237,7 +192,8 @@ static void read_uptime_fields (FILE *fp, long int *uptime, long int *idle)
 
 
 /* TEST */
-void read_pid_stats_test (int pid)
+/*
+static void read_pid_stats_test (int pid)
 {
   FILE *fp;
   pid_stat_t stat_struct;
@@ -259,7 +215,39 @@ void read_pid_stats_test (int pid)
          );
   close_pid_stat (fp);
 }
+*/
 
+/*
+static long int get_cpu_clk (FILE *fp)
+{
+  pid_stat_t pid_stat;
+  long int util = 0;
+  int take_child_flag = 0; // NOTE: Need to make configurable
+  
+  read_pid_stat_fields (fp, &pid_stat);
+  util = pid_stat.utime + pid_stat.stime;
+  if (take_child_flag == 1)
+  {
+    util += pid_stat.cutime + pid_stat.cstime;
+  }
+  
+  return util;
+}
+*/
+
+/* Sent SIGCONT to pid. This is done before exitting */
+static void do_cleanup (pid_t pid)
+{
+  kill (pid, SIGCONT);
+}
+
+
+/* Non static functions */
+
+void usage (void)
+{
+  printf ("Enter a pid and percentage to cap\n");
+}
 
 long get_clk_tck_per_sec (void)
 {
@@ -308,42 +296,11 @@ long int timeval_to_usec (struct timeval temp)
   return temp.tv_sec * MICRO_MULT + temp.tv_usec;
 }
 
-/* TODO: Group control: Write a new function
- * Make seperate function to fetch the cpu cycle usage for each process (maybe kep the
- * file open, and pass it as an argument). Then write a group control function which 
- * will scale the percentage for each of the processes in the group according to the
- * weightages assigned and then call the 'leash_cpu' function.
- */
-
-long int get_cpu_clk (FILE *fp)
-{
-  pid_stat_t pid_stat;
-  long int util = 0;
-  int take_child_flag = 0; /* TODO: Need to make configurable */
-  
-  read_pid_stat_fields (fp, &pid_stat);
-  util = pid_stat.utime + pid_stat.stime;
-  if (take_child_flag == 1)
-  {
-    util += pid_stat.cutime + pid_stat.cstime;
-  }
-  
-  return util;
-}
-
-#define SAMPLE_NSEC (1.0 * NANO_MULT)
-
-/* Sent SIGCONT to pid. This is done before exitting */
-void do_cleanup (pid_t pid)
-{
-  kill (pid, SIGCONT);
-}
-
 
 /* On first call or when flags is set to LFLG_RESET_CPU_ITER this function
  * will return -1. This function is a utility to use in other functions
  */
-double get_pid_cpu_util (FILE *fp, unsigned int flags)
+double get_pid_cpu_util (pid_t pid, unsigned int flags)
 {
   static int iter = 0;
   static struct timeval last_time, this_time;
@@ -353,7 +310,7 @@ double get_pid_cpu_util (FILE *fp, unsigned int flags)
 //   double running_secs;
   long int uptime, idletime;
   int take_child_time_flag = 1, retval;
-  FILE *uptime_fp;
+  FILE *uptime_fp = NULL, *pid_stat_fp;
   long int hz, nlcores;
   
   if (flags & LFLG_RESET_CPU_ITER)
@@ -361,18 +318,29 @@ double get_pid_cpu_util (FILE *fp, unsigned int flags)
     iter = 0;
   }
   
-  hz        = get_clk_tck_per_sec ();
-  nlcores   = get_cpu_cores ();
+  /* NOTE:
+   * Shall we get the file pointers and then hold them, or open-close
+   * them at each call. Anyways this function is not re-entrant. One problem
+   * holding the file pointers will be, how to free them. The closing
+   * responsibility then needs to go to the caller or a special flag 
+   * telling to close it, or just ignore closing.
+   * Check the impact of openning and closing at each call.
+   */
+  pid_stat_fp = open_pid_stat (pid);
   uptime_fp = open_uptime_file ();
   read_uptime_fields (uptime_fp, &uptime, &idletime);
-
-  read_pid_stat_fields (fp, &new_pid_stat);
+  read_pid_stat_fields (pid_stat_fp, &new_pid_stat);
   retval = gettimeofday (&this_time, NULL);
   if (retval != 0)
   {
     fprintf (stderr, "Problem calling \'gettimeofday\'\n");
     return cpu_util;
   }
+  
+  hz        = get_clk_tck_per_sec ();
+  nlcores   = get_cpu_cores ();
+  
+
   /* If this is the first time then just initialize */
   if (iter == 0)
   {
@@ -413,12 +381,14 @@ double get_pid_cpu_util (FILE *fp, unsigned int flags)
   last_time  = this_time;
   iter++;
   
+  close_uptime_file (uptime_fp);
+  close_pid_stat (pid_stat_fp);
+  
   return cpu_util;
 }
 
 void leash_cpu (int pid, double frac, struct timespec *user_sample_time, int flags)
 {
-  FILE *fp;
   double util, dyn_ratio;
   long int stop_time_nsec, run_time_nsec;
   struct timespec stop_time, run_time;
@@ -432,11 +402,9 @@ void leash_cpu (int pid, double frac, struct timespec *user_sample_time, int fla
     #endif
     sample_nsec = timespec_to_nsec (*user_sample_time);
   }
-  
-  fp = open_pid_stat (pid);
-  
+    
   dyn_ratio = frac;
-  (void) get_pid_cpu_util (fp, LFLG_RESET_CPU_ITER);
+  (void) get_pid_cpu_util (pid, LFLG_RESET_CPU_ITER);
   util = frac;
   while (1)
   {
@@ -468,27 +436,8 @@ void leash_cpu (int pid, double frac, struct timespec *user_sample_time, int fla
     do_complete_nanosleep (run_time);
     
     
-    util = get_pid_cpu_util (fp, LFLG_OVERALL_CPU_PERCENT);
+    util = get_pid_cpu_util (pid, LFLG_OVERALL_CPU_PERCENT);
     count++;
-  }
-  
-  close_pid_stat (fp);
-}
-
-/* NOTE: Demo */
-void print_cpu_util (pid_t pid, long int interval)
-{
-  FILE *fp = open_pid_stat (pid);
-  if (fp == NULL)
-  {
-    error (0, errno, "Error");
-    return;
-  }
-  
-  while (1)
-  {
-    printf ("%.2f\n", get_pid_cpu_util (fp, 1));
-    sleep (interval);
   }
 }
 
