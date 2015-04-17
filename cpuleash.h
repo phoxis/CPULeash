@@ -13,6 +13,7 @@
 #define LFLG_VERBOSE             0x10
 
 #define SAMPLE_NSEC (1.0 * NANO_MULT)
+#define SAMPLE_USEC (1.0 * MICRO_MULT)
 
 typedef struct _pid_stat_t {
   int pid;
@@ -70,7 +71,7 @@ long int timespec_to_nsec (struct timespec temp);
 struct timeval usec_to_timeval (long int usec);
 long int timeval_to_usec (struct timeval temp);
 int is_pid_running (int pid);
-void leash_cpu (int pid, double frac, struct timespec *user_sample_time, int flags);
+void leash_cpu (pid_t pid, double frac, struct timespec *user_sample_time, int flags);
  
 
 #endif

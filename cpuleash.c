@@ -26,7 +26,7 @@ static void close_uptime_file (FILE *fp);
 static void read_uptime_fields (FILE *fp, long int *uptime, long int *idle);
 // static void read_pid_stats_test (int pid);
 // static long int get_cpu_clk (FILE *fp);
-static void do_cleanup (pid_t pid);
+static void do_cleanup_pid (pid_t pid);
 long int get_cpu_clk (FILE *fp);
 double get_pid_cpu_util (pid_t pid, unsigned int flags);
 
@@ -236,7 +236,7 @@ static long int get_cpu_clk (FILE *fp)
 */
 
 /* Sent SIGCONT to pid. This is done before exitting */
-static void do_cleanup (pid_t pid)
+static void do_cleanup_pid (pid_t pid)
 {
   kill (pid, SIGCONT);
 }
@@ -327,6 +327,11 @@ double get_pid_cpu_util (pid_t pid, unsigned int flags)
    * Check the impact of openning and closing at each call.
    */
   pid_stat_fp = open_pid_stat (pid);
+  if ((pid_stat_fp == NULL) && !is_pid_running (pid))
+  {
+    fprintf (stdout, "pid = %d is not running anymore. Terminating\n", pid);
+    raise (SIGINT);
+  }
   uptime_fp = open_uptime_file ();
   read_uptime_fields (uptime_fp, &uptime, &idletime);
   read_pid_stat_fields (pid_stat_fp, &new_pid_stat);
@@ -387,7 +392,7 @@ double get_pid_cpu_util (pid_t pid, unsigned int flags)
   return cpu_util;
 }
 
-void leash_cpu (int pid, double frac, struct timespec *user_sample_time, int flags)
+void leash_cpu (pid_t pid, double frac, struct timespec *user_sample_time, int flags)
 {
   double util, dyn_ratio;
   long int stop_time_nsec, run_time_nsec;
@@ -421,14 +426,15 @@ void leash_cpu (int pid, double frac, struct timespec *user_sample_time, int fla
     {
       if (count % 24 == 0)
       {
-        printf ("frac\tutil\tdyn_ratio\t\tstop\t\trun\n");
+        printf ("target\t\tcur_util\tdyn_ratio\tstop_time\trun_time\n");
       }
-      printf ("%0.2f\t%0.2f\t%0.2f\t\t%010ld\t\t%010ld\n", frac, util, dyn_ratio, stop_time_nsec, run_time_nsec);
+      printf ("%0.2f\t\t%0.2f\t\t%0.2f\t\t%010ld\t%010ld\n", frac, util, dyn_ratio, stop_time_nsec, run_time_nsec);
     }
+    
     
     if (stop_time_nsec > 0)
     {
-      // TODO: Check if tht pid exists
+      // TODO: Check if the pid exists
       kill (pid, SIGSTOP);
       do_complete_nanosleep (stop_time);
       kill (pid, SIGCONT);
@@ -441,48 +447,172 @@ void leash_cpu (int pid, double frac, struct timespec *user_sample_time, int fla
   }
 }
 
+
 int main (int argc, char *argv[])
 {
-  int pid, overall_percent_flag;
-  double percent, frac;
-  unsigned int flags = 0x00;
+  char c, *optsrting = "l:L:vs:p:", *endptr;
+  double l_val = -1, L_val = -1;
+  long int nproc;
+  double sample_sec = -1, frac;
+  int verbose = 0;
+  unsigned int flags = 0x00, param_comb_invalid = 0;
   struct timespec user_sample_time;
-
-  if (argc <  3)
+  pid_t pid = -1;
+  
+  
+  while ((c = getopt (argc, argv, optsrting)) != -1)
   {
-    usage ();
-    exit (0);
+    switch (c)
+    {
+      case 'l':
+        if (L_val != -1)
+        {
+          fprintf (stderr, "Options -l and -L are mutually exclusive\n");
+          goto CLEANUP;
+        }
+        
+        l_val = strtod (optarg, &endptr);
+        if (*endptr != '\0')
+        {
+          fprintf (stderr, "Malformed argument for -l: %s\n", optarg);
+          goto CLEANUP;
+        }
+        
+        if ((l_val < 0.0) || (l_val > 100.0))
+        {
+          fprintf (stderr, "Invalid scaled leash value in -l: %lf\nValid range is [0, 100]\n", l_val);
+          goto CLEANUP;
+        }
+        
+        break;
+        
+      case 'L':
+        if (l_val != -1)
+        {
+          fprintf (stderr, "Options -l and -L are mutually exclusive\n");
+          goto CLEANUP;
+        }
+        
+        L_val = strtod (optarg, &endptr);
+        if (*endptr != '\0')
+        {
+          fprintf (stderr, "Malformed argument for -L: %s\n", optarg);
+          goto CLEANUP;
+        }
+        
+        nproc = get_cpu_cores ();
+        if ((L_val < 0.0) || (L_val > (nproc * 100.0)))
+        {
+          fprintf (stderr, "Invalid absolute leash value in -L: %lf\nValid range is [0, %ld] in this system with %ld processors\n", L_val, nproc * 100, nproc);
+          goto CLEANUP;
+        }
+        
+        break;
+        
+      case 'v':
+        verbose = 1;
+        break;
+        
+      case 's':
+        sample_sec = strtod (optarg, &endptr);
+        if (*endptr != '\0')
+        {
+          fprintf (stderr, "Malformed argument for -s: %s\n", optarg);
+          goto CLEANUP;
+        }
+        
+        //TODO: Set an upper limit
+        if (sample_sec <= 0)
+        {
+          fprintf (stderr, "Invalid specified sample time: %lf\nSample time should be greater than 0 microseconds\n", sample_sec);
+          goto CLEANUP;
+        }
+        
+        break;
+        
+      case 'p':
+        pid = strtol (optarg, &endptr, 10);
+        if (*endptr != '\0')
+        {
+          fprintf (stderr, "Malformed argument for -p: %s\n", optarg);
+        }
+        break;
+        
+      case ':':
+        fprintf (stderr, "Option -%c requires an argument\n", optopt);
+        break;
+        
+      case '?':
+        fprintf (stderr, "Invalid option -%c\n", optopt);
+        break;
+        
+      default:
+        break;
+    }
   }
-
-  pid = atoi (argv[1]);
-  percent = atof (argv[2]);
-  if (argc == 4)
+  
+  /* Mandatory -l or -L and -p */
+  if ((l_val == -1) && (L_val == -1))
   {
-    overall_percent_flag = atoi (argv[3]);
-    overall_percent_flag = (overall_percent_flag != 0); /* 0 or 1 */
+    fprintf (stderr, "Either -l or -L needs to be specified\n");
+    param_comb_invalid = 1;
+  }
+  
+  if (pid == -1)
+  {
+    fprintf (stderr, "Process ID needs to be specified using -p\n");
+    param_comb_invalid = 1;
+  }
+  
+  if (param_comb_invalid)
+  {
+    goto CLEANUP;
+  }
+  
+  /* Parameter settings */
+  if (l_val != -1)
+  {
+    frac = l_val / 100.0;
+    if (verbose) fprintf (stdout, "l = %lf\n", l_val);
+  }
+  
+  if (L_val != -1)
+  {
+    frac = L_val / (100.0 * nproc);
+    if (verbose) fprintf (stdout, "L = %lf\n", L_val);
+  }
+  
+  if (verbose) 
+  {
+    fprintf (stdout, "verbose =  %d\n", verbose);
+    flags |= LFLG_VERBOSE;
+  }
+  
+  /* Time is always manually set */
+  if (sample_sec != -1)
+  {
+    user_sample_time = nsec_to_timespec ((long int) floor (sample_sec * NANO_MULT));
+    if (verbose) fprintf (stdout, "Sample time: %lf sec\n(%ld sec, %ld nsec)\n", sample_sec, user_sample_time.tv_sec, user_sample_time.tv_nsec);
   }
   else
   {
-    overall_percent_flag = 1;
+    user_sample_time = nsec_to_timespec ((long int) SAMPLE_NSEC);
+    if (verbose) fprintf (stdout, "Sample time (default): %ld us\n(%ld sec, %ld nsec)\n", (long int) SAMPLE_NSEC, user_sample_time.tv_sec, user_sample_time.tv_nsec);
   }
-
-  if (overall_percent_flag == 1)
-  {
-    flags |= LFLG_OVERALL_CPU_PERCENT;
-  }
-  flags |= (LFLG_VERBOSE | LFLG_SET_SAMPLE_TIME);
-  user_sample_time = nsec_to_timespec (SAMPLE_NSEC/2.0);
+  flags |= LFLG_SET_SAMPLE_TIME;
   
+  if (verbose) fprintf (stdout, "frac = %lf\n", frac);
+  if (verbose) fprintf (stdout, "pid = %d\n", pid);
+  if (verbose) fprintf (stdout, "\n");
+
+  /* Call leash_cpu */
   if (!is_pid_running (pid))
   {
-    printf ("PID = %d is not running\n", pid);
-    exit (0);
+    fprintf (stdout, "pid = %d is not running\n", pid);
+    goto CLEANUP;
   }
   
   set_signal_handler ();
-  
-  frac = percent / 100.0;
-  
   sigsetjmp (jmp_env, 1);
   if (!sig_flag)
   {
@@ -490,9 +620,10 @@ int main (int argc, char *argv[])
   }
   else
   {
-    do_cleanup (pid);
+    do_cleanup_pid (pid);
   }
-
+  
+  CLEANUP:
+  
   return 0;
 }
-
