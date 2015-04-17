@@ -1,6 +1,8 @@
 #ifndef CPULEASH_H
 #define CPULEASH_H
 
+#define VERSION "1.0"
+
 #define BUF_MAX 256
 // #define DEBUG 1
 

@@ -29,7 +29,7 @@ static void read_uptime_fields (FILE *fp, long int *uptime, long int *idle);
 static void do_cleanup_pid (pid_t pid);
 long int get_cpu_clk (FILE *fp);
 double get_pid_cpu_util (pid_t pid, unsigned int flags);
-
+void usage (void);
 
 static volatile sig_atomic_t sig_flag = 0;
 static sigjmp_buf jmp_env;
@@ -246,7 +246,21 @@ static void do_cleanup_pid (pid_t pid)
 
 void usage (void)
 {
-  printf ("Enter a pid and percentage to cap\n");
+  int ncpus = get_cpu_cores ();
+  
+  fprintf (stdout, "CPULeash: Keeps a given running process leashed under a certain cpu utilization threshold\n");
+  fprintf (stdout, "Usage:\ncpuleash (-l scaled_percent | -L absolute_percent) -p pid [-s sample_time] [-v] [-h]\n");
+  fprintf (stdout, 
+  "-l: Scaled percent value. Range [0, 100]. Target cpu value divided by the number of cpu \n\
+    in the system. Current system: %d\n", ncpus);
+  fprintf (stdout, 
+  "-L: Absolute percent value. Range [0, %d]. Target cpu value is absolute.\n", 100 * ncpus);
+  fprintf (stdout, "-p: PID to leash\n");
+  fprintf (stdout, "-s: Sample time (optional)\n");
+  fprintf (stdout, "-v: Verbose\n");
+  fprintf (stdout, "-h: Shows this help\n");
+  fprintf (stdout, "\nOption -p is mandatory. \n-l and -L are mutually exclusive and mandatory.\n");
+  fprintf (stdout, "\nCPULeash version %s\nAuthor: Arjun Pakrashi (phoxis [at] gmail [dot] com)\n", VERSION);
 }
 
 long get_clk_tck_per_sec (void)
@@ -450,12 +464,12 @@ void leash_cpu (pid_t pid, double frac, struct timespec *user_sample_time, int f
 
 int main (int argc, char *argv[])
 {
-  char c, *optsrting = "l:L:vs:p:", *endptr;
+  char c, *optsrting = "l:L:vs:p:h", *endptr;
   double l_val = -1, L_val = -1;
   long int nproc;
   double sample_sec = -1, frac;
   int verbose = 0;
-  unsigned int flags = 0x00, param_comb_invalid = 0;
+  unsigned int flags = 0x00, param_comb_invalid = 0, show_usage = 0;
   struct timespec user_sample_time;
   pid_t pid = -1;
   
@@ -468,20 +482,20 @@ int main (int argc, char *argv[])
         if (L_val != -1)
         {
           fprintf (stderr, "Options -l and -L are mutually exclusive\n");
-          goto CLEANUP;
+          goto END_MAIN_CLEANUP;
         }
         
         l_val = strtod (optarg, &endptr);
         if (*endptr != '\0')
         {
           fprintf (stderr, "Malformed argument for -l: %s\n", optarg);
-          goto CLEANUP;
+          goto END_MAIN_CLEANUP;
         }
         
         if ((l_val < 0.0) || (l_val > 100.0))
         {
           fprintf (stderr, "Invalid scaled leash value in -l: %lf\nValid range is [0, 100]\n", l_val);
-          goto CLEANUP;
+          goto END_MAIN_CLEANUP;
         }
         
         break;
@@ -490,27 +504,23 @@ int main (int argc, char *argv[])
         if (l_val != -1)
         {
           fprintf (stderr, "Options -l and -L are mutually exclusive\n");
-          goto CLEANUP;
+          goto END_MAIN_CLEANUP;
         }
         
         L_val = strtod (optarg, &endptr);
         if (*endptr != '\0')
         {
           fprintf (stderr, "Malformed argument for -L: %s\n", optarg);
-          goto CLEANUP;
+          goto END_MAIN_CLEANUP;
         }
         
         nproc = get_cpu_cores ();
         if ((L_val < 0.0) || (L_val > (nproc * 100.0)))
         {
           fprintf (stderr, "Invalid absolute leash value in -L: %lf\nValid range is [0, %ld] in this system with %ld processors\n", L_val, nproc * 100, nproc);
-          goto CLEANUP;
+          goto END_MAIN_CLEANUP;
         }
         
-        break;
-        
-      case 'v':
-        verbose = 1;
         break;
         
       case 's':
@@ -518,14 +528,14 @@ int main (int argc, char *argv[])
         if (*endptr != '\0')
         {
           fprintf (stderr, "Malformed argument for -s: %s\n", optarg);
-          goto CLEANUP;
+          goto END_MAIN_CLEANUP;
         }
         
-        //TODO: Set an upper limit
+        //TODO: Set an upper and lower limit
         if (sample_sec <= 0)
         {
           fprintf (stderr, "Invalid specified sample time: %lf\nSample time should be greater than 0 microseconds\n", sample_sec);
-          goto CLEANUP;
+          goto END_MAIN_CLEANUP;
         }
         
         break;
@@ -536,6 +546,15 @@ int main (int argc, char *argv[])
         {
           fprintf (stderr, "Malformed argument for -p: %s\n", optarg);
         }
+        break;
+        
+      case 'v':
+        verbose = 1;
+        break;
+      
+      case 'h':
+        show_usage = 1;
+        goto END_MAIN_CLEANUP;
         break;
         
       case ':':
@@ -566,7 +585,8 @@ int main (int argc, char *argv[])
   
   if (param_comb_invalid)
   {
-    goto CLEANUP;
+    show_usage = 1;
+    goto END_MAIN_CLEANUP;
   }
   
   /* Parameter settings */
@@ -609,7 +629,7 @@ int main (int argc, char *argv[])
   if (!is_pid_running (pid))
   {
     fprintf (stdout, "pid = %d is not running\n", pid);
-    goto CLEANUP;
+    goto END_MAIN_CLEANUP;
   }
   
   set_signal_handler ();
@@ -623,7 +643,12 @@ int main (int argc, char *argv[])
     do_cleanup_pid (pid);
   }
   
-  CLEANUP:
+  END_MAIN_CLEANUP:
+  
+  if (show_usage)
+  {
+    usage ();
+  }
   
   return 0;
 }
