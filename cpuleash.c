@@ -588,7 +588,10 @@ void leash_cpu (struct leash_pid_attrs *pid_attr, int n, struct timespec *user_s
     {
       if (pid_attr[i].valid)
       {
-        run_time = nsec_to_timespec(sample_nsec - pid_attr[n-1].run_time_nsec);
+        /* FIXME: Make sure this computation works here. Need to find out the remaining time to spend running all the processes.
+         * We take the last valid process with highest stop time
+         */
+        run_time = nsec_to_timespec(sample_nsec - pid_attr[i].stop_time_nsec);
         break;
       }
     }
