@@ -26,6 +26,7 @@
 #define VERSION "1.0"
 
 #define BUF_MAX 256
+#define LMIN_PID_ATTR_N 16
 // #define DEBUG 1
 
 #define NANO_MULT  1000000000L
@@ -87,6 +88,25 @@ typedef struct _pid_stat_t {
 } pid_stat_t;
 
 
+struct cpu_util_state
+{
+  int iter;
+  struct timeval last_time, this_time;
+  pid_stat_t old_pid_stat, new_pid_stat;  
+};
+
+struct leash_pid_attrs
+{
+  pid_t pid;
+  double frac, util, dyn_ratio;
+  long int stop_time_nsec, run_time_nsec;
+  struct cpu_util_state util_state;
+  int valid;
+};
+
+struct leash_pid_attrs *malloc_leash_pid_attrs (int n);
+void free_leash_pid_attrs (struct leash_pid_attrs *temp);
+
 void usage (void);
 long get_clk_tck_per_sec (void);
 long get_cpu_cores (void);
@@ -95,7 +115,7 @@ long int timespec_to_nsec (struct timespec temp);
 struct timeval usec_to_timeval (long int usec);
 long int timeval_to_usec (struct timeval temp);
 int is_pid_running (int pid);
-void leash_cpu (pid_t pid, double frac, struct timespec *user_sample_time, int flags);
+void leash_cpu (struct leash_pid_attrs *pid_attr, int n, struct timespec *user_sample_time, int flags);
  
 
 #endif
