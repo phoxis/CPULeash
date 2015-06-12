@@ -281,15 +281,16 @@ void usage (void)
   fprintf (stdout, "CPULeash: Keeps a given running process leashed under a certain cpu utilization threshold\n");
   fprintf (stdout, "Usage:\ncpuleash (-l scaled_percent | -L absolute_percent) -p pid [-s sample_time] [-v] [-h]\n");
   fprintf (stdout, 
-  "-l: Scaled percent value. Range [0, 100]. Target cpu value divided by the number of cpu \n\
+  "-l: Comma seperated scaled percent value. Range [0, 100]. Target cpu value divided by the number of cpu \n\
     in the system. Current system: %d\n", ncpus);
   fprintf (stdout, 
-  "-L: Absolute percent value. Range [0, %d]. Target cpu value is absolute.\n", 100 * ncpus);
-  fprintf (stdout, "-p: PID to leash\n");
+  "-L: Comma seperated absolute percent value. Range [0, %d]. Target cpu value is absolute.\n", 100 * ncpus);
+  fprintf (stdout, "-p: Comma seperated PIDs to leash\n");
   fprintf (stdout, "-s: Sample time (optional)\n");
   fprintf (stdout, "-v: Verbose\n");
   fprintf (stdout, "-h: Shows this help\n");
   fprintf (stdout, "\nOption -p is mandatory. \n-l and -L are mutually exclusive and mandatory.\n");
+  fprintf (stdout, "\nExample: The invocation `cpuleash -L 33,55,66,77 -p 123,456,789,345' will leash the PIDs to the corresponding percentages\n");
   fprintf (stdout, "\nCPULeash version %s\nAuthor: Arjun Pakrashi (phoxis [at] gmail [dot] com)\n", VERSION);
 }
 
@@ -469,7 +470,13 @@ static int leash_pid_attrs_compare (const void *a, const void *b)
 {
   return ((struct leash_pid_attrs *) a)->stop_time_nsec - ((struct leash_pid_attrs *) b)->stop_time_nsec;
 }
-    
+
+
+/* TODO: Group leash for process tree. Possible idea: Either make another leash_cpu function which will take care or this
+ * OR introduce a flag which will indicate that we are going to leash one process tree, and after each iteration this
+ * function will repopulate the process trees and check for terminated or added processes and then add them in the list
+ * feedback can be given per process or aggregated with respect to the parent process
+ */    
 void leash_cpu (struct leash_pid_attrs *pid_attr, int n, struct timespec *user_sample_time, int flags)
 {
   struct timespec stop_time, run_time;
@@ -503,6 +510,7 @@ void leash_cpu (struct leash_pid_attrs *pid_attr, int n, struct timespec *user_s
     if (pid_attr[i].valid)
     {
       pid_attr[i].dyn_ratio = pid_attr[i].frac;
+      /* Initialize with first time call */
       (void) get_pid_cpu_util (pid_attr[i].pid, LFLG_RESET_CPU_ITER, &pid_attr[i].util_state);
       pid_attr[i].util = pid_attr[i].frac;
     }
@@ -535,6 +543,7 @@ void leash_cpu (struct leash_pid_attrs *pid_attr, int n, struct timespec *user_s
       /* NOTE: We can pass feedback function pointer. Or it is unnecessary */
       if (count % 24 == 0)
       {
+        printf ("Total leashed processes: %d\n", valid_count);
         printf ("pid\ttarget\t\tcur_util\tdyn_ratio\tstop_time\trun_time\n");
       }
       for (i=0; i<n; i++)
@@ -543,6 +552,10 @@ void leash_cpu (struct leash_pid_attrs *pid_attr, int n, struct timespec *user_s
         {
           printf ("%d\t%0.2f\t\t%0.2f\t\t%0.2f\t\t%010ld\t%010ld\n", pid_attr[i].pid, pid_attr[i].frac, pid_attr[i].util, pid_attr[i].dyn_ratio, pid_attr[i].stop_time_nsec, pid_attr[i].run_time_nsec);
         }
+        else
+        {
+          printf ("%d\t%0.2f\t\t%s\t\t%s\t\t%s\t\t%s\n", pid_attr[i].pid, pid_attr[i].frac, "TERM", "NA", "NA", "NA");
+        }
       }
       printf ("--\n");
     }
@@ -550,6 +563,7 @@ void leash_cpu (struct leash_pid_attrs *pid_attr, int n, struct timespec *user_s
     /* Sort the 'pid_attr' in ascending order by stop_time_nsec. Then find the 'stop_segment'
      * timing after which the corresponding process should be started
      */
+    /* FIXME: We can get sorted index and optimize a bit or sort using pointers instead of the objects themselves */
     qsort (pid_attr, n, sizeof (struct leash_pid_attrs), leash_pid_attrs_compare);
     for (i=0, last_val=0; i<n; i++)
     {
@@ -603,14 +617,15 @@ void leash_cpu (struct leash_pid_attrs *pid_attr, int n, struct timespec *user_s
       if (pid_attr[i].valid)
       {
         pid_attr[i].util = get_pid_cpu_util (pid_attr[i].pid, LFLG_OVERALL_CPU_PERCENT, &pid_attr[i].util_state);
-      }
-      if (pid_attr[i].util == -2) /*TODO: make this process a bit better */
-      {
-        pid_attr[i].valid = 0;
-        valid_count--;
-        if (valid_count == 0)
+        
+        if (pid_attr[i].util == -2) /*TODO: make this process a bit better */
         {
-          raise (SIGINT);
+          pid_attr[i].valid = 0;
+          valid_count--;
+          if (valid_count == 0)
+          {
+            raise (SIGINT);
+          }
         }
       }
     }
@@ -763,7 +778,6 @@ int main (int argc, char *argv[])
           
           pid_attr[pid_count].pid = pid_temp;
           pid_attr[pid_count].valid = 1; /* FIXME: Set valid flag here ? */
-          printf ("%s [[[%d]]\n", tok, pid_attr[pid_count].pid);
           pid_count++;
           tok = strtok (NULL, sep);
           
