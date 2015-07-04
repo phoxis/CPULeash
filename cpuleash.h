@@ -23,10 +23,13 @@
 #ifndef CPULEASH_H
 #define CPULEASH_H
 
+#include "list.h"
+
 #define VERSION "1.0"
 
 #define BUF_MAX 256
 #define LMIN_PID_ATTR_N 16
+#define MAX_PIDS 32768
 // #define DEBUG 1
 
 #define NANO_MULT  1000000000L
@@ -35,7 +38,8 @@
 #define LFLG_OVERALL_CPU_PERCENT 0x01
 #define LFLG_RESET_CPU_ITER      0x02
 #define LFLG_SET_SAMPLE_TIME     0x04
-#define LFLG_VERBOSE             0x10
+#define LFLG_VERBOSE             0x08
+#define LFLG_GROUP               0x10
 
 #define SAMPLE_NSEC (1.0 * NANO_MULT)
 #define SAMPLE_USEC (1.0 * MICRO_MULT)
@@ -101,11 +105,12 @@ struct leash_pid_attrs
   double frac, util, dyn_ratio;
   long int stop_time_nsec, run_time_nsec;
   struct cpu_util_state util_state;
+  struct list_head pid_link;
   int valid;
 };
 
-struct leash_pid_attrs *malloc_leash_pid_attrs (int n);
-void free_leash_pid_attrs (struct leash_pid_attrs *temp);
+struct leash_pid_attrs *malloc_leash_pid_attrs (void);
+void free_leash_pid_attrs (struct leash_pid_attrs *ptr);
 
 void usage (void);
 long get_clk_tck_per_sec (void);
@@ -115,7 +120,8 @@ long int timespec_to_nsec (struct timespec temp);
 struct timeval usec_to_timeval (long int usec);
 long int timeval_to_usec (struct timeval temp);
 int is_pid_running (int pid);
-void leash_cpu (struct leash_pid_attrs *pid_attr, int n, struct timespec *user_sample_time, int flags);
+void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *user_sample_time, int flags);
  
+
 
 #endif

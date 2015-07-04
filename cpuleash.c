@@ -48,7 +48,7 @@ static void close_uptime_file (FILE *fp);
 static void read_uptime_fields (FILE *fp, long int *uptime, long int *idle);
 // static void read_pid_stats_test (int pid);
 // static long int get_cpu_clk (FILE *fp);
-static void do_cleanup_pid (struct leash_pid_attrs *pid_attr, int n);
+static void do_cleanup_pid (struct list_head *pid_attr_list_head);
 long int get_cpu_clk (FILE *fp);
 double get_pid_cpu_util (pid_t pid, unsigned int flags, struct cpu_util_state *state);
 static int leash_pid_attrs_compare (const void *a, const void *b);
@@ -213,7 +213,6 @@ static void read_uptime_fields (FILE *fp, long int *uptime, long int *idle)
   return;
 }
 
-
 /* TEST */
 /*
 static void read_pid_stats_test (int pid)
@@ -259,15 +258,21 @@ static long int get_cpu_clk (FILE *fp)
 */
 
 /* Sent SIGCONT to pid. This is done before exitting */
-static void do_cleanup_pid (struct leash_pid_attrs *pid_attr, int n)
-{
-  int i;
-  for (i=0; i<n; i++)
+static void do_cleanup_pid (struct list_head *pid_attr_list_head)
+{  
+  struct list_head *pid_attr_list_temp, *temp_list_store;
+  struct leash_pid_attrs *pid_attr_temp;
+  
+  list_for_each_safe (pid_attr_list_temp, temp_list_store, pid_attr_list_head)
   {
-    if (pid_attr[i].valid)
+    pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
+  
+    if (pid_attr_temp->valid)
     {
-      kill (pid_attr[i].pid, SIGCONT);
+      kill (pid_attr_temp->pid, SIGCONT);
     }
+    list_del (pid_attr_list_temp);
+    free_leash_pid_attrs (pid_attr_temp);
   }
 }
 
@@ -294,35 +299,31 @@ void usage (void)
   fprintf (stdout, "\nCPULeash version %s\nAuthor: Arjun Pakrashi (phoxis [at] gmail [dot] com)\n", VERSION);
 }
 
-struct leash_pid_attrs *malloc_leash_pid_attrs (int n)
+struct leash_pid_attrs *malloc_leash_pid_attr (void)
 {
   struct leash_pid_attrs *temp;
-  int i;
   
-  temp = malloc (sizeof (struct leash_pid_attrs) * n);
+  temp = malloc (sizeof (struct leash_pid_attrs));
   if (temp == NULL)
   {
     return NULL;
   }
   
-  for (i=0; i<n; i++)
-  {
-    temp[i].pid             = -1;
-    temp[i].frac            = -1;
-    temp[i].util            = -1;
-    temp[i].dyn_ratio       = -1;
-    temp[i].stop_time_nsec  = -1;
-    temp[i].run_time_nsec   = -1;
-    temp[i].valid           =  0;
-    temp[i].util_state.iter =  0;
-  }
+  temp->pid             = -1;
+  temp->frac            = -1;
+  temp->util            = -1;
+  temp->dyn_ratio       = -1;
+  temp->stop_time_nsec  = -1;
+  temp->run_time_nsec   = -1;
+  temp->valid           =  0;
+  temp->util_state.iter =  0;
   
   return temp;
 }
 
-void free_leash_pid_attrs (struct leash_pid_attrs *temp)
+void free_leash_pid_attrs (struct leash_pid_attrs *ptr)
 {
-  free (temp);
+  free (ptr);
 }
 
 long get_clk_tck_per_sec (void)
@@ -468,34 +469,52 @@ double get_pid_cpu_util (pid_t pid, unsigned int flags, struct cpu_util_state *s
 
 static int leash_pid_attrs_compare (const void *a, const void *b)
 {
-  return ((struct leash_pid_attrs *) a)->stop_time_nsec - ((struct leash_pid_attrs *) b)->stop_time_nsec;
+  return (((struct leash_pid_attrs *) a))->stop_time_nsec - (((struct leash_pid_attrs *) b))->stop_time_nsec;
+}
+
+static int get_max_pids (void)
+{
+  return MAX_PIDS;
 }
 
 
 /* TODO: Group leash for process tree. Possible idea: Either make another leash_cpu function which will take care or this
  * OR introduce a flag which will indicate that we are going to leash one process tree, and after each iteration this
  * function will repopulate the process trees and check for terminated or added processes and then add them in the list
- * feedback can be given per process or aggregated with respect to the parent process
+ * feedback can be given per process or aggregated with respect to the parent process.
+ * 
+ * TODO: FIXME: We really need to make a linked list of pid_attr instead of an array. Work on this. Use a uniform
+ * interface with the array so that it can be easily replacable.
+ * 
+ * ISSUES to handle
+ * the length of pid_attr. Or locally allocate pid_attr and forget the passed argument.
+ * In each iteration we need to repopulate the children
+ * Depending on the number of children scale the .frac component
  */    
-void leash_cpu (struct leash_pid_attrs *pid_attr, int n, struct timespec *user_sample_time, int flags)
+void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *user_sample_time, int flags)
 {
+  struct list_head *pid_attr_list_temp, *temp_list_store;
+  struct leash_pid_attrs *pid_attr_temp, **pid_attr_ptr_arr_temp;
   struct timespec stop_time, run_time;
   int count = 0, i;
   long int sample_nsec = SAMPLE_NSEC;
   long int *stop_segment, last_val;
   int valid_count;
   
+  pid_attr_ptr_arr_temp = malloc (sizeof (struct leash_pid_attrs) * get_max_pids ());
   
   set_signal_handler (); /* TODO: Later restore the handler while cleanup */
   
-  for (i=0, valid_count = 0; i<n; i++)
+  valid_count = 0;
+  list_for_each (pid_attr_list_temp, pid_attr_list_head)
   {
-    if (pid_attr[i].valid)
+    pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
+    if (pid_attr_temp->valid)
     {
       valid_count++;
     }
   }
-
+  
   if ((flags & LFLG_SET_SAMPLE_TIME) && (user_sample_time != NULL))
   {
     #if DEBUG==1
@@ -505,38 +524,48 @@ void leash_cpu (struct leash_pid_attrs *pid_attr, int n, struct timespec *user_s
     sample_nsec = timespec_to_nsec (*user_sample_time);
   }
   
-  for (i=0; i<n; i++)
+  list_for_each (pid_attr_list_temp, pid_attr_list_head)
   {
-    if (pid_attr[i].valid)
+    pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
+  
+    if (pid_attr_temp->valid)
     {
-      pid_attr[i].dyn_ratio = pid_attr[i].frac;
+      pid_attr_temp->dyn_ratio = pid_attr_temp->frac;
       /* Initialize with first time call */
-      (void) get_pid_cpu_util (pid_attr[i].pid, LFLG_RESET_CPU_ITER, &pid_attr[i].util_state);
-      pid_attr[i].util = pid_attr[i].frac;
+      (void) get_pid_cpu_util (pid_attr_temp->pid, LFLG_RESET_CPU_ITER, &pid_attr_temp->util_state);
+      pid_attr_temp->util = pid_attr_temp->frac;
     }
   }
   
-  stop_segment = malloc (sizeof (long int) * n);
+  stop_segment = malloc (sizeof (long int) * get_max_pids ());
   if (stop_segment == NULL)
   {
     fprintf (stderr, "Not enough memory\n");
     return;
   }
   
+  
   sigsetjmp (jmp_env, 1);
   while (!sig_flag)
-  {
-    for (i=0; i<n; i++)
+  { 
+  
+    list_for_each (pid_attr_list_temp, pid_attr_list_head)
     {
-      if (pid_attr[i].valid)
+      pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
+      
+      if (pid_attr_temp->valid)
       {
-        pid_attr[i].dyn_ratio = pid_attr[i].dyn_ratio / pid_attr[i].util * pid_attr[i].frac;
-        pid_attr[i].dyn_ratio = pid_attr[i].dyn_ratio > 1 ? 1 : pid_attr[i].dyn_ratio;
+        pid_attr_temp->dyn_ratio = pid_attr_temp->dyn_ratio / pid_attr_temp->util * pid_attr_temp->frac;
+        pid_attr_temp->dyn_ratio = pid_attr_temp->dyn_ratio > 1 ? 1 : pid_attr_temp->dyn_ratio;
          
-        pid_attr[i].run_time_nsec  = pid_attr[i].dyn_ratio * sample_nsec;
-        pid_attr[i].stop_time_nsec = sample_nsec - pid_attr[i].run_time_nsec;
+        pid_attr_temp->run_time_nsec  = pid_attr_temp->dyn_ratio * sample_nsec;
+        pid_attr_temp->stop_time_nsec = sample_nsec - pid_attr_temp->run_time_nsec;
       }
+      
+      /* NOTE: Counting the number of processes in the first */
+      n++;
     }
+  
     
     if (flags & LFLG_VERBOSE)
     {
@@ -546,82 +575,111 @@ void leash_cpu (struct leash_pid_attrs *pid_attr, int n, struct timespec *user_s
         printf ("Total leashed processes: %d\n", valid_count);
         printf ("pid\ttarget\t\tcur_util\tdyn_ratio\tstop_time\trun_time\n");
       }
-      for (i=0; i<n; i++)
+      
+      list_for_each (pid_attr_list_temp, pid_attr_list_head)
       {
-        if (pid_attr[i].valid)
+        pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
+       
+        if (pid_attr_temp->valid)
         {
-          printf ("%d\t%0.2f\t\t%0.2f\t\t%0.2f\t\t%010ld\t%010ld\n", pid_attr[i].pid, pid_attr[i].frac, pid_attr[i].util, pid_attr[i].dyn_ratio, pid_attr[i].stop_time_nsec, pid_attr[i].run_time_nsec);
+          printf ("%d\t%0.2f\t\t%0.2f\t\t%0.2f\t\t%010ld\t%010ld\n", pid_attr_temp->pid, pid_attr_temp->frac, pid_attr_temp->util, pid_attr_temp->dyn_ratio, pid_attr_temp->stop_time_nsec, pid_attr_temp->run_time_nsec);
         }
         else
         {
-          printf ("%d\t%0.2f\t\t%s\t\t%s\t\t%s\t\t%s\n", pid_attr[i].pid, pid_attr[i].frac, "TERM", "NA", "NA", "NA");
-        }
+          printf ("%d\t%0.2f\t\t%s\t\t%s\t\t%s\t\t%s\n", pid_attr_temp->pid, pid_attr_temp->frac, "TERM", "NA", "NA", "NA");
+        } 
       }
+      
       printf ("--\n");
     }
     
     /* Sort the 'pid_attr' in ascending order by stop_time_nsec. Then find the 'stop_segment'
      * timing after which the corresponding process should be started
      */
-    /* FIXME: We can get sorted index and optimize a bit or sort using pointers instead of the objects themselves */
-    qsort (pid_attr, n, sizeof (struct leash_pid_attrs), leash_pid_attrs_compare);
-    for (i=0, last_val=0; i<n; i++)
+    /* FIXME: We need to make one iteration of the entire linked list and then populate
+     * an array with the stop_time_nsec values and the pid values, and then sort them by
+     * the stop_time_nsec values and use this array to call kill. As the pid space is small
+     * this intermediate array will not take much memory, but we need to try to find out 
+     * a better way if possible, which will also be faster.
+     */
+    
+    valid_count = 0;
+    list_for_each (pid_attr_list_temp, pid_attr_list_head)
     {
-      if (pid_attr[i].valid)
+      pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
+      
+      if (pid_attr_temp->valid)
       {
-        stop_segment[i] = pid_attr[i].stop_time_nsec - last_val;
-        last_val = pid_attr[i].stop_time_nsec;
+        pid_attr_ptr_arr_temp[valid_count++] = pid_attr_temp;
+      }
+    }
+    
+    qsort (pid_attr_ptr_arr_temp, valid_count, sizeof (struct leash_pid_attrs *), leash_pid_attrs_compare);
+    for (i=0, last_val=0; i<valid_count; i++)
+    {   
+      if (pid_attr_ptr_arr_temp[i]->valid)
+      {
+        stop_segment[i] = pid_attr_ptr_arr_temp[i]->stop_time_nsec - last_val;
+        last_val = pid_attr_ptr_arr_temp[i]->stop_time_nsec;
       }
     }
     
     /* TODO: Check return value of kill and notify that the process has stopped */
     /* Stop all processes */
-    for (i=0; i<n; i++)
+    for (i=0; i<valid_count; i++)
     {
-      if (pid_attr[i].valid)
+      if (pid_attr_ptr_arr_temp[i]->valid)
       {
-        kill (pid_attr[i].pid, SIGSTOP);
+//         printf ("stop %d\n", pid_attr_ptr_arr_temp[i]->pid);
+        kill (pid_attr_ptr_arr_temp[i]->pid, SIGSTOP);
       }
     }
     
     /* Wake processes one by one in the order of stop_time_nsec, the amount of sleep is 
      * guided by the stop_segment
      */
-    for (i=0; i<n; i++)
+    for (i=0; i<valid_count; i++)
     {
-      if (pid_attr[i].valid)
+      if (pid_attr_ptr_arr_temp[i]->valid)
       {
+//         printf ("cont %d\n", pid_attr_ptr_arr_temp[i]->pid);
         stop_time = nsec_to_timespec (stop_segment[i]);
         do_complete_nanosleep (stop_time);
-        kill (pid_attr[i].pid, SIGCONT);
+        kill (pid_attr_ptr_arr_temp[i]->pid, SIGCONT);
       }
     }
     
     /* Spend remaining sample time */
-    for (i=n-1; i>=0; i--)
+    for (i=valid_count-1; i>=0; i--)
     {
-      if (pid_attr[i].valid)
+      if (pid_attr_ptr_arr_temp[i]->valid)
       {
         /* FIXME: Make sure this computation works here. Need to find out the remaining time to spend running all the processes.
          * We take the last valid process with highest stop time
          */
-        run_time = nsec_to_timespec(sample_nsec - pid_attr[i].stop_time_nsec);
+        run_time = nsec_to_timespec(sample_nsec - pid_attr_ptr_arr_temp[i]->stop_time_nsec);
         break;
       }
     }
     do_complete_nanosleep (run_time);
     
     /* Get utilization for next iteration */
-    for (i=0; i<n; i++)
+    list_for_each_safe (pid_attr_list_temp, temp_list_store, pid_attr_list_head)
     {
-      if (pid_attr[i].valid)
+      pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
+      if (pid_attr_temp->valid)
       {
-        pid_attr[i].util = get_pid_cpu_util (pid_attr[i].pid, LFLG_OVERALL_CPU_PERCENT, &pid_attr[i].util_state);
+        pid_attr_temp->util = get_pid_cpu_util (pid_attr_temp->pid, LFLG_OVERALL_CPU_PERCENT, &pid_attr_temp->util_state);
         
-        if (pid_attr[i].util == -2) /*TODO: make this process a bit better */
+        if (pid_attr_temp->util == -2) /*TODO: make this process a bit better */
         {
-          pid_attr[i].valid = 0;
+          pid_attr_temp->valid = 0;
+          
+          list_del (pid_attr_list_temp);
+          free_leash_pid_attrs (pid_attr_temp);
+          
           valid_count--;
+          printf ("valid_count = %d\n", valid_count);
           if (valid_count == 0)
           {
             raise (SIGINT);
@@ -636,8 +694,9 @@ void leash_cpu (struct leash_pid_attrs *pid_attr, int n, struct timespec *user_s
   /* Uncomment when we use this first time. This avoids the compiler warning */
 //   LEASH_CLEANUP:
   
+  free (pid_attr_ptr_arr_temp);
   free (stop_segment);
-  do_cleanup_pid (pid_attr, n);
+  do_cleanup_pid (pid_attr_list_head);
   
   return;
 }
@@ -652,7 +711,8 @@ int main (int argc, char *argv[])
   int verbose = 0, i;
   unsigned int flags = 0x00, param_comb_invalid = 0, show_usage = 0;
   struct timespec user_sample_time;
-  struct leash_pid_attrs *pid_attr;
+  struct leash_pid_attrs *pid_attr_temp;
+  struct list_head pid_attr_list_head, *pid_attr_list_temp;
   int pid_count = 0, l_val_count = 0, L_val_count = 0;
   int pid_temp;
   int l_val_alloc_size, L_val_alloc_size, pid_attr_alloc_size;
@@ -660,7 +720,7 @@ int main (int argc, char *argv[])
   /* TODO: resize as required */
   l_val_alloc_size = L_val_alloc_size = pid_attr_alloc_size = LMIN_PID_ATTR_N;
   
-  pid_attr = malloc_leash_pid_attrs (pid_attr_alloc_size);
+  INIT_LIST_HEAD (&pid_attr_list_head);
   l_val = malloc (sizeof (double) * l_val_alloc_size);
   L_val = malloc (sizeof (double) * L_val_alloc_size);
   
@@ -776,9 +836,11 @@ int main (int argc, char *argv[])
             goto END_MAIN_CLEANUP;
           }
           
-          pid_attr[pid_count].pid = pid_temp;
-          pid_attr[pid_count].valid = 1; /* FIXME: Set valid flag here ? */
+          pid_attr_temp = malloc_leash_pid_attr ();
+          pid_attr_temp->pid = pid_temp;
+          pid_attr_temp->valid = 1;
           pid_count++;
+          list_add_tail (&pid_attr_temp->pid_link, &pid_attr_list_head);
           tok = strtok (NULL, sep);
           
         } while (tok);
@@ -861,42 +923,49 @@ int main (int argc, char *argv[])
   }
   flags |= LFLG_SET_SAMPLE_TIME;
 
-  for (i=0; i<pid_count; i++)
-  {    
+  i = 0;
+  list_for_each (pid_attr_list_temp, &pid_attr_list_head)
+  {
     /* Parameter settings */
+    pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
+    
     if (l_val_count != 0)
     {
-      pid_attr[i].frac = l_val[i] / 100.0;
+      pid_attr_temp->frac = l_val[i] / 100.0;
       if (verbose) fprintf (stdout, "l = %lf\n", l_val[i]);
     }
   
     if (L_val_count != 0)
     {
-      pid_attr[i].frac = L_val[i] / (100.0 * nproc);
+      pid_attr_temp->frac = L_val[i] / (100.0 * nproc);
       if (verbose) fprintf (stdout, "L = %lf\n", L_val[i]);
     }
     
-    if (verbose) fprintf (stdout, "frac = %lf\n", pid_attr[i].frac);
-    if (verbose) fprintf (stdout, "pid = %d\n", pid_attr[i].pid);
+    if (verbose) fprintf (stdout, "frac = %lf\n", pid_attr_temp->frac);
+    if (verbose) fprintf (stdout, "pid = %d\n", pid_attr_temp->pid);
   
     if (verbose) fprintf (stdout, "\n");
-  }
-
-  for (i=0; i<pid_count; i++)
-  {
-    if (!is_pid_running (pid_attr[i].pid))
-    {
-      fprintf (stdout, "pid = %d is not running\n", pid_attr[i].pid);
-      pid_attr[i].valid = 0;
-    }
+    
+    // NOTE: Are we safe from array out of bounds
+    i++;
   }
   
+  list_for_each (pid_attr_list_temp, &pid_attr_list_head)
+  {
+    pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
+    
+    if (!is_pid_running (pid_attr_temp->pid))
+    {
+      fprintf (stdout, "pid = %d is not running\n", pid_attr_temp->pid);
+      pid_attr_temp->valid = 0;
+    }
+  }
+
   /* Call leash_cpu */
-  leash_cpu (pid_attr, pid_count, &user_sample_time, flags);
+  leash_cpu (&pid_attr_list_head, pid_count, &user_sample_time, flags);
   
   END_MAIN_CLEANUP:
   
-  free_leash_pid_attrs (pid_attr);
   free (l_val);
   free (L_val);
   if (show_usage)
