@@ -108,7 +108,7 @@ struct cpu_util_state
 struct leash_pid_attrs
 {
   pid_t pid;
-  double frac, util, dyn_ratio;
+  double frac, dyn_frac, util, dyn_ratio;
   long int stop_time_nsec, run_time_nsec;
   struct cpu_util_state util_state;
   struct list_head pid_link;
@@ -126,7 +126,7 @@ long int timespec_to_nsec (struct timespec temp);
 struct timeval usec_to_timeval (long int usec);
 long int timeval_to_usec (struct timeval temp);
 int is_pid_running (int pid);
-void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *user_sample_time, int flags);
+void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, int n, struct timespec *user_sample_time, int flags);
  
 
 

@@ -601,15 +601,17 @@ static int get_max_pids (void)
  * function will repopulate the process trees and check for terminated or added processes and then add them in the list
  * feedback can be given per process or aggregated with respect to the parent process.
  * 
- * TODO: FIXME: We really need to make a linked list of pid_attr instead of an array. Work on this. Use a uniform
- * interface with the array so that it can be easily replacable.
+ * TODO: Use a uniform interface with the array so that it can be easily replacable.
  * 
  * ISSUES to handle
  * the length of pid_attr. Or locally allocate pid_attr and forget the passed argument.
  * In each iteration we need to repopulate the children
  * Depending on the number of children scale the .frac component
+ * 
+ * TODO: We need to find out how to make relative weights within the groups, or ignore for the next version. We need to
+ * find out the behaviour when one processes terminates. By default all processes will have same weight.
  */    
-void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *user_sample_time, int flags)
+void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, int n, struct timespec *user_sample_time, int flags)
 {
   struct list_head *pid_attr_list_temp, *temp_list_store;
   struct leash_pid_attrs *pid_attr_temp, **pid_attr_ptr_arr_temp, *root_pid_attr;
@@ -620,7 +622,7 @@ void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *us
   unsigned char *bitmap;
   pid_t *children_pid_list;
   int valid_count, grp_over_thresh, grp_under_thresh;
-  double grp_total_frac_remain, grp_pid_frac_remain, grp_pid_frac_tolerance = GRP_TOLERANCE; // TODO; If this works then we can make the tolerance user configurable
+  double grp_total_frac_remain = 0.0, grp_pid_frac_remain, frac_delta = 0.0, grp_pid_frac_tolerance = GRP_TOLERANCE; // TODO; If this works then we can make the tolerance user configurable
   long int nlcores;
   
   pid_attr_ptr_arr_temp = malloc (sizeof (struct leash_pid_attrs) * get_max_pids ());
@@ -669,7 +671,7 @@ void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *us
       pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
       if (pid_attr_temp->valid)
       {
-        pid_attr_temp->frac = (1.0 / (valid_count * nlcores));
+        pid_attr_temp->dyn_frac = /* FIXME: pid_attr_temp->frac * */((1.0 / (valid_count * nlcores)) * group_leash_value);
       }
     }
   }
@@ -680,10 +682,10 @@ void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *us
   
     if (pid_attr_temp->valid)
     {
-      pid_attr_temp->dyn_ratio = pid_attr_temp->frac;
+      pid_attr_temp->dyn_ratio = pid_attr_temp->dyn_frac;
       /* Initialize with first time call */
       (void) get_pid_cpu_util (pid_attr_temp->pid, LFLG_RESET_CPU_ITER, &pid_attr_temp->util_state);
-      pid_attr_temp->util = pid_attr_temp->frac;
+      pid_attr_temp->util = pid_attr_temp->dyn_frac;
     }
   }
   
@@ -731,9 +733,9 @@ void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *us
           pid_attr_temp->pid = children_pid_list[i];
           pid_attr_temp->valid = 1;
           
-          pid_attr_temp->frac = (1.0 / (valid_count * nlcores));
-          pid_attr_temp->dyn_ratio = pid_attr_temp->frac;
-          pid_attr_temp->util = pid_attr_temp->frac;
+          pid_attr_temp->dyn_frac = /* FIXME: pid_attr_temp->frac * */ ((1.0 / (valid_count * nlcores)) * group_leash_value);
+          pid_attr_temp->dyn_ratio = pid_attr_temp->dyn_frac;
+          pid_attr_temp->util = pid_attr_temp->dyn_frac;
           
           /* Initialize with first time call */
           (void) get_pid_cpu_util (pid_attr_temp->pid, LFLG_RESET_CPU_ITER, &pid_attr_temp->util_state);
@@ -762,17 +764,17 @@ void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *us
            * TODO: Need to see if this works good or else we need to get some better idea
            * on the group capping.
            */
-          grp_pid_frac_remain = pid_attr_temp->frac - pid_attr_temp->util;
-          printf ("%lf - %lf = grp_pid_frac_remain = %lf\n", pid_attr_temp->frac, pid_attr_temp->util, grp_pid_frac_remain);
+          grp_pid_frac_remain = pid_attr_temp->dyn_frac - pid_attr_temp->util;
+          printf ("%lf - %lf = grp_pid_frac_remain = %lf\n", pid_attr_temp->dyn_frac, pid_attr_temp->util, grp_pid_frac_remain);
           if (grp_pid_frac_remain >= grp_pid_frac_tolerance)
           {
             grp_under_thresh++;
 //             grp_total_frac_remain += (grp_pid_frac_remain - grp_pid_frac_tolerance);
             grp_total_frac_remain += grp_pid_frac_remain;
-//             pid_attr_temp->frac = pid_attr_temp->util + grp_pid_frac_tolerance;
-//             if (pid_attr_temp->frac > 1.0)
+//             pid_attr_temp->dyn_frac = pid_attr_temp->util + grp_pid_frac_tolerance;
+//             if (pid_attr_temp->dyn_frac > 1.0)
 //             {
-//               pid_attr_temp->frac = 1.0;
+//               pid_attr_temp->dyn_frac = 1.0;
 //             }
           }
           valid_count++;
@@ -803,13 +805,13 @@ void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *us
 //               * as the other processes trying to exceed are capped, therefore the difference might not
 //               * be negative. TODO: Need to see if this works.
 //               */
-//             grp_pid_frac_remain = pid_attr_temp->frac - pid_attr_temp->util;
+//             grp_pid_frac_remain = pid_attr_temp->dyn_frac - pid_attr_temp->util;
 //             if (!(grp_pid_frac_remain >= grp_pid_frac_tolerance))
 //             {
-// //               pid_attr_temp->frac += (grp_total_frac_remain / (double) grp_over_thresh);
-//               if (pid_attr_temp->frac > 1.0)
+// //               pid_attr_temp->dyn_frac += (grp_total_frac_remain / (double) grp_over_thresh);
+//               if (pid_attr_temp->dyn_frac > 1.0)
 //               {
-//                 pid_attr_temp->frac = 1.0;
+//                 pid_attr_temp->dyn_frac = 1.0;
 //               }
 //             }
 //             else
@@ -821,6 +823,11 @@ void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *us
 //       }
     }
 
+    if (flags | LFLG_GROUP)
+    {
+      frac_delta = (grp_over_thresh > 0) ? (grp_total_frac_remain / (double) grp_over_thresh) : 0.0;
+    }
+   
     valid_count = 0;
     list_for_each (pid_attr_list_temp, pid_attr_list_head)
     {
@@ -828,7 +835,8 @@ void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *us
       
       if (pid_attr_temp->valid)
       {
-        pid_attr_temp->dyn_ratio = pid_attr_temp->dyn_ratio / pid_attr_temp->util * (pid_attr_temp->frac + (grp_total_frac_remain / (double) grp_over_thresh));
+        
+        pid_attr_temp->dyn_ratio = pid_attr_temp->dyn_ratio / pid_attr_temp->util * (pid_attr_temp->dyn_frac + frac_delta);
         pid_attr_temp->dyn_ratio = pid_attr_temp->dyn_ratio > 1 ? 1 : pid_attr_temp->dyn_ratio;
          
         pid_attr_temp->run_time_nsec  = pid_attr_temp->dyn_ratio * sample_nsec;
@@ -851,6 +859,7 @@ void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *us
       if (count % 24 == 0)
       {
         printf ("Total leashed processes: %d\n", valid_count);
+        printf ("Group leash enabled: %s\tGroup leash value: %lf\n", ((flags | LFLG_GROUP) ? "yes" : "no"), group_leash_value);
         printf ("pid\ttarget\t\tcur_util\tdyn_ratio\tstop_time\trun_time\n");
       }
       
@@ -860,11 +869,11 @@ void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *us
        
         if (pid_attr_temp->valid)
         {
-          printf ("%d\t%0.2f\t\t%0.2f\t\t%0.2f\t\t%010ld\t%010ld\n", pid_attr_temp->pid, pid_attr_temp->frac, pid_attr_temp->util, pid_attr_temp->dyn_ratio, pid_attr_temp->stop_time_nsec, pid_attr_temp->run_time_nsec);
+          printf ("%d\t%0.2f\t\t%0.2f\t\t%0.2f\t\t%010ld\t%010ld\n", pid_attr_temp->pid, pid_attr_temp->dyn_frac, pid_attr_temp->util, pid_attr_temp->dyn_ratio, pid_attr_temp->stop_time_nsec, pid_attr_temp->run_time_nsec);
         }
         else
         {
-          printf ("%d\t%0.2f\t\t%s\t\t%s\t\t%s\t\t%s\n", pid_attr_temp->pid, pid_attr_temp->frac, "TERM", "NA", "NA", "NA");
+          printf ("%d\t%0.2f\t\t%s\t\t%s\t\t%s\t\t%s\n", pid_attr_temp->pid, pid_attr_temp->dyn_frac, "TERM", "NA", "NA", "NA");
         } 
       }
       
@@ -981,17 +990,17 @@ void leash_cpu (struct list_head *pid_attr_list_head, int n, struct timespec *us
 
 int main (int argc, char *argv[])
 {
-  char c, *optsrting = "l:L:vs:p:h", *endptr, *sep = ",", *tok;
+  char c, *optsrting = "l:L:vs:p:hg:j:J:", *endptr, *sep = ",", *tok;
   double *l_val, *L_val;
   long int nproc;
-  double sample_sec = -1;
+  double sample_sec = -1, group_leash_value = -1;
   int verbose = 0, i;
   unsigned int flags = 0x00, param_comb_invalid = 0, show_usage = 0;
   struct timespec user_sample_time;
   struct leash_pid_attrs *pid_attr_temp;
   struct list_head pid_attr_list_head, *pid_attr_list_temp;
-  int pid_count = 0, l_val_count = 0, L_val_count = 0;
-  int pid_temp;
+  int pid_count = 0, l_val_count = 0, L_val_count = 0, pid_temp;
+  int p_or_g_flag = '\0', j_or_J = '\0';
   int l_val_alloc_size, L_val_alloc_size, pid_attr_alloc_size;
   
   /* TODO: resize as required */
@@ -1010,6 +1019,8 @@ int main (int argc, char *argv[])
   {
     L_val[i] = -1;
   }
+  
+  nproc = get_cpu_cores ();
   
   while ((c = getopt (argc, argv, optsrting)) != -1)
   {
@@ -1064,7 +1075,6 @@ int main (int argc, char *argv[])
             goto END_MAIN_CLEANUP;
           }
         
-          nproc = get_cpu_cores ();
           if ((L_val[L_val_count] < 0.0) || (L_val[L_val_count] > (nproc * 100.0)))
           {
             fprintf (stderr, "Invalid absolute leash value in -L: %lf in %s\nValid range is [0, %ld] in this system with %ld processors\n", L_val[L_val_count], optarg, nproc * 100, nproc);
@@ -1076,6 +1086,60 @@ int main (int argc, char *argv[])
           
         } while (tok);
         
+        break;
+        
+      case 'j':
+        if (j_or_J == 'J')
+        {
+          fprintf (stderr, "Options -j and -J are mutually exclusive\n");
+          goto END_MAIN_CLEANUP;
+        }
+        else
+        {
+          j_or_J = 'j';
+        }
+        
+        group_leash_value = strtod (optarg, &endptr);
+        if (*endptr != '\0')
+        {
+          fprintf (stderr, "Malformed argument for -j: %s\n", optarg);
+          goto END_MAIN_CLEANUP;
+        }
+        
+        if ((group_leash_value < 0.0) || (group_leash_value >  100.0))
+        {
+          fprintf (stderr, "Invalid scaled group leash value in -j: %lf\nValid range is [0, 100]\n", group_leash_value);
+          goto END_MAIN_CLEANUP;
+        }
+
+        break;
+        
+      case 'J':
+        if (j_or_J == 'j')
+        {
+          fprintf (stderr, "Options -j and -J are mutually exclusive\n");
+          goto END_MAIN_CLEANUP;
+        }
+        else
+        {
+          j_or_J = 'J';
+        }
+        
+        group_leash_value = strtod (optarg, &endptr);
+        if (*endptr != '\0')
+        {
+          fprintf (stderr, "Malformed argument for -J: %s\n", optarg);
+          goto END_MAIN_CLEANUP;
+        }
+        
+        if ((group_leash_value < 0.0) || (group_leash_value > (nproc * 100.0)))
+        {
+          fprintf (stderr, "Invalid absolute group leash value in -J: %lf\nValid range is [0, %ld] in this system with %ld processors\n", group_leash_value, nproc * 100, nproc);
+          goto END_MAIN_CLEANUP;
+        }
+        
+        group_leash_value = group_leash_value / (double) (100.0 * nproc);
+
         break;
         
       case 's':
@@ -1096,6 +1160,26 @@ int main (int argc, char *argv[])
         break;
         
       case 'p':
+        if (p_or_g_flag == 'g')
+        {
+          fprintf (stderr, "Options -p and -g are mutually exclusive\n");
+          goto END_MAIN_CLEANUP;
+        }
+        else
+        {
+          p_or_g_flag = 'p';
+        }
+        /* fall-through */
+        
+      case 'g':
+        if (p_or_g_flag == 'p')
+        {
+          fprintf (stderr, "Options -p and -g are mutually exclusive\n");
+        }
+        else
+        {
+          p_or_g_flag = 'g';
+        }
         /* TODO: if pid_count >= pid_attr_alloc_size then we need to resize */
         tok = strtok (optarg, sep);
         do
@@ -1148,11 +1232,23 @@ int main (int argc, char *argv[])
   
   /* The vaues of L_val_count or l_val_count and pid_count should be same */
   
-  /* Mandatory -l or -L and -p */
-  if ((l_val_count == 0) && (L_val_count == 0))
+  if (p_or_g_flag == 'p')
   {
-    fprintf (stderr, "Either -l or -L needs to be specified\n");
-    param_comb_invalid = 1;
+    /* Mandatory -l or -L and -p */
+    if ((l_val_count == 0) && (L_val_count == 0))
+    {
+      fprintf (stderr, "Either -l or -L needs to be specified with -p\n");
+      param_comb_invalid = 1;
+    }
+  }
+  
+  if (p_or_g_flag == 'g')
+  {
+    if (j_or_J == '\0')
+    {
+      fprintf (stderr, "Argument -j or -J needs to be specified with -g\n");
+      param_comb_invalid = 1;
+    }
   }
   
   if (pid_count == 0)
@@ -1161,15 +1257,39 @@ int main (int argc, char *argv[])
     param_comb_invalid = 1;
   }
   
+  /* TODO: If -g is present then -j or -J is mandatory. In this case if -l or -L is given 
+   * will be computed from these values. If -l or -L is not given then equal division will
+   * be done, we can copy it.
+   */
+  
+  /* If group leash is selected and there is no -l or -L given then we will make equal weight 
+   * for each process in the group and therefore equally divide the weights within the processes
+   */
+  /*
+   * NOTE: Not using now. Need to decide on the group internal weights
+  if (p_or_g_flag == 'g')
+  {
+    if ((l_val_count == 0) && (L_val_count == 0))
+    {
+      for (i = 0; i < pid_count; i++)
+      {
+        l_val[i] =  100.0 / (double) pid_count;
+        printf ("l_val[%d] = %lf\n", i, l_val[i]);
+      }
+    }
+    l_val_count = pid_count;
+  }
+  */
+  
   if ((l_val_count != 0) && (pid_count != l_val_count))
   {
-    fprintf (stderr, "Number of arguments in -l and -p should be same\n");
+    fprintf (stderr, "Number of arguments in -l and -%c should be same\n", p_or_g_flag);
     show_usage = 1;
     goto END_MAIN_CLEANUP;
   }
   else if ((L_val_count != 0) && (pid_count != L_val_count))
   {
-    fprintf (stderr, "Number of arguments in -L and -p should be same\n");
+    fprintf (stderr, "Number of arguments in -L and -%c should be same\n", p_or_g_flag);
     show_usage = 1;
     goto END_MAIN_CLEANUP;
   }
@@ -1199,12 +1319,15 @@ int main (int argc, char *argv[])
     if (verbose) fprintf (stdout, "Sample time (default): %ld us\n(%ld sec, %ld nsec)\n", (long int) SAMPLE_NSEC, user_sample_time.tv_sec, user_sample_time.tv_nsec);
   }
   flags |= LFLG_SET_SAMPLE_TIME;
+  
+  
 
   i = 0;
   list_for_each (pid_attr_list_temp, &pid_attr_list_head)
   {
     /* Parameter settings */
     pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
+    
     
     if (l_val_count != 0)
     {
@@ -1221,11 +1344,18 @@ int main (int argc, char *argv[])
     if (verbose) fprintf (stdout, "frac = %lf\n", pid_attr_temp->frac);
     if (verbose) fprintf (stdout, "pid = %d\n", pid_attr_temp->pid);
   
+    if (p_or_g_flag == 'g')
+    {
+      flags |= LFLG_GROUP;
+    }
+    if (verbose) fprintf (stdout, "Leashing mode: %s\n", p_or_g_flag == 'p' ? "Individual" : "Group");
+    
     if (verbose) fprintf (stdout, "\n");
     
     // NOTE: Are we safe from array out of bounds
     i++;
   }
+  
   
   list_for_each (pid_attr_list_temp, &pid_attr_list_head)
   {
@@ -1238,9 +1368,8 @@ int main (int argc, char *argv[])
     }
   }
 
-  flags |= LFLG_GROUP;
   /* Call leash_cpu */
-  leash_cpu (&pid_attr_list_head, pid_count, &user_sample_time, flags);
+  leash_cpu (&pid_attr_list_head, group_leash_value, pid_count, &user_sample_time, flags);
   
   END_MAIN_CLEANUP:
   
