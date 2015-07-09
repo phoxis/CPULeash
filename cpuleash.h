@@ -30,6 +30,7 @@
 #define BUF_MAX 256
 #define LMIN_PID_ATTR_N 16
 #define MAX_PIDS 32768
+#define GRP_TOLERANCE (0.01)
 // #define DEBUG 1
 
 #define NANO_MULT  1000000000L
@@ -43,6 +44,11 @@
 
 #define SAMPLE_NSEC (1.0 * NANO_MULT)
 #define SAMPLE_USEC (1.0 * MICRO_MULT)
+
+#define SET(bitmap,x) (bitmap[(x)>>3] |= (0x01 << ((x) & 0x07)))
+#define CLEAR(bitmap,x) (bitmap[(x)>>3] &= ~(0x01 << ((x) & 0x07)))
+#define IS_SET(bitmap,x) (bitmap[(x)>>3] & (0x01 << ((x) & 0x07)))
+
 
 typedef struct _pid_stat_t {
   int pid;
