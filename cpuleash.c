@@ -621,7 +621,7 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
   long int *stop_segment, last_val;
   unsigned char *bitmap;
   pid_t *children_pid_list;
-  int valid_count, grp_over_thresh, grp_under_thresh;
+  int valid_count, grp_over_thresh, grp_under_thresh, new_pids;
   double grp_total_frac_remain = 0.0, grp_pid_frac_remain, frac_delta = 0.0, grp_pid_frac_tolerance = GRP_TOLERANCE; // TODO; If this works then we can make the tolerance user configurable
   long int nlcores;
   
@@ -675,6 +675,17 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
       }
     }
   }
+  else 
+  {
+    list_for_each (pid_attr_list_temp, pid_attr_list_head)
+    {
+      pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
+      if (pid_attr_temp->valid)
+      {
+        pid_attr_temp->dyn_frac = pid_attr_temp->frac;
+      }
+    }
+  }
   
   list_for_each (pid_attr_list_temp, pid_attr_list_head)
   {
@@ -702,14 +713,7 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
   while (!sig_flag)
   { 
     if (flags & LFLG_GROUP)
-    {
-      /*
-       ** TODO: Make an algorithm through which the processes will utilize the entire
-       ** group time. That is if there are two processes, and both have 0.5 share of
-       ** the group, and if one process is not utilizing the process as all, then the
-       ** other process will utilize the entire share.
-       */
-      
+    { 
       /* If we are group leashing then we need to first check which processes were 
        * added and then append them to the linked list, but we will not disturb the
        * existing process attributes
@@ -722,9 +726,17 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
       children_pid_list = malloc (sizeof (pid_t) * 1);
       children_pid_list[0] = -1;
       
-      for (valid_count = 0; children_pid_list[valid_count] != -1; valid_count++)
-        ;
+      /* Count how many new pids have joined*/
+      for (i = 0, new_pids = 0; children_pid_list[i] != -1; i++)
+      {
+        if (!IS_SET (bitmap, children_pid_list[i]))
+        {
+          new_pids++;
+        }
+      }
+      valid_count += new_pids;
       
+      /* Add new pids and change the dynamic fraction of them */
       for (i = 0; children_pid_list[i] != -1; i++)
       {
         if (!IS_SET (bitmap, children_pid_list[i]))
@@ -751,7 +763,7 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
        */
       grp_total_frac_remain = 0.0;
       grp_under_thresh = grp_over_thresh = 0;
-      valid_count = 0;
+//       valid_count = 0;
       list_for_each (pid_attr_list_temp, pid_attr_list_head)
       {
         pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
@@ -764,6 +776,7 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
            * TODO: Need to see if this works good or else we need to get some better idea
            * on the group capping.
            */
+          pid_attr_temp->dyn_frac = /* FIXME: pid_attr_temp->frac * */ ((1.0 / (valid_count * nlcores)) * group_leash_value); // Update the cap depending on the currently running processes.
           grp_pid_frac_remain = pid_attr_temp->dyn_frac - pid_attr_temp->util;
           printf ("%lf - %lf = grp_pid_frac_remain = %lf\n", pid_attr_temp->dyn_frac, pid_attr_temp->util, grp_pid_frac_remain);
           if (grp_pid_frac_remain >= grp_pid_frac_tolerance)
@@ -777,7 +790,7 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
 //               pid_attr_temp->dyn_frac = 1.0;
 //             }
           }
-          valid_count++;
+//           valid_count++;
         }
       }
       grp_over_thresh = valid_count - grp_under_thresh;
@@ -823,7 +836,7 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
 //       }
     }
 
-    if (flags | LFLG_GROUP)
+    if (flags & LFLG_GROUP)
     {
       frac_delta = (grp_over_thresh > 0) ? (grp_total_frac_remain / (double) grp_over_thresh) : 0.0;
     }
