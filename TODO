@@ -1,0 +1,61 @@
+IMMEDIATE WORK: Go through the code and modularize, think on how this can be made pluggable with the group thing
+
+// Challenges:
+// Compute the amount of sleep required for each pid
+// What should be the sample time within which the cpu utilization should be taken
+//                        and the sample time is t. Then when we sleep in the loop for s seconds and then
+//                        we again sleep for t seconds in the main loop making the sample interval s + t
+//                        needs to be checked.
+// TODO: Before exitting this program, we need to make sure to leave all the processes in running state [DONE]
+// TODO: See clock_nanosleep for better implementation possibility
+// TODO: If, for example an application is running in 40% and leash is given a target of 60%, how it will handle it ? [DONE]
+// TODO: handle multi threaded application. DONE
+// TODO: Handle process group capping 
+// TODO: Maybe thermal capping in future
+// TODO: Deamonize
+// TODO: Do not multi-thread now 
+
+// TODO [DONE]: Investigate negative stop time when applied on firefox
+// FIXME: The group leash or multiple process leashing seems unstable. Can we make it more stable?
+// FIXME: NEXT: What if cpuleash runs as one user and the signals are to other user processes, then how the error will be handled? Resolve this.
+
+// TODO: NEXT: 'get_pid_tree' should collect the list of children in all depth recursively, somehow. Code this seperately and plug in
+// TODO: NEXT: Leash by process name ? Make the pids of a certain process name a group or seperate entities to be leashed
+// TODO: PRIORITY: Clean 'leash_cpu' code. Document the logic, and make sure that unnecessary computations and mess are cleaned.
+// TODO: PRIORITY: Check the experimental branch, check and test all changes
+// TODO: PRIORITY: Code cleanup in experimental.
+// TODO: PRIORITY: Branch out 1.0 from main
+// TODO: PRIORITY: Once all the above is done and experimental is final, merge with main
+
+// TODO: Exclude list
+
+// TODO [DONE]: Next to next version: Give the given a parent, leash all the child as a group. Use the -t as switch, standing for tree.
+
+// TODO: Check how the sleeping of this application interferes with the process scheduler heuristics to figureout for interactive/non-insteractive process
+
+// TODO: When multiple processes are leashed by one executable then the percentage capping is not that stable. Check how to fix.
+
+// TODO: Addition of a configuration file which will be read on some signal or some other mechanism, so that pids can be added or removed to be monitored dynamically
+
+// BUG: When done something like this ./cpuleash -v -p 25302,25307,26431 -L 25,35,75 -s 0.5
+// it works. but if done something like this ./cpuleash -v -p 25302,25307,26431 -L 75,35,25 -s 0.5
+// The leashing does not leash as mentioned. I think there is a stale variable problem or some problem for which
+// The ordering in the argument is making some kind of problem [FIXED, sorting callback method had problem]
+
+// PROBLEM: Now the group leash testing needs to be done in all manner
+
+Feature
+
+Enter cpu utilization capping as scaled 100% or based on number of cpus.
+Take a flag which will indicate if the the utilization is scaled or not scaled.
+For not scaled input make sure it is not more than the number of cpus * 100
+-l to scaled leash, -L to not scaled leash.
+
+Take the process id as input
+-p pid
+
+Also give an option to take input as the process name.
+-n name
+
+At present if the there are multiple instances of the process running, maybe give a list to select to leash. Or maybe give an option to take the first one.
+
