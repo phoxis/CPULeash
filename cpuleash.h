@@ -31,6 +31,7 @@
 #define LMIN_PID_ATTR_N 16
 #define MAX_PIDS 32768
 #define GRP_TOLERANCE (0.01)
+#define MAX_TREES 1
 // #define DEBUG 1
 
 #define NANO_MULT  1000000000L
@@ -41,6 +42,7 @@
 #define LFLG_SET_SAMPLE_TIME     0x04
 #define LFLG_VERBOSE             0x08
 #define LFLG_GROUP               0x10
+#define LFLG_TREE_GROUP          0x20
 
 #define SAMPLE_NSEC (1.0 * NANO_MULT)
 #define SAMPLE_USEC (1.0 * MICRO_MULT)

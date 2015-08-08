@@ -301,7 +301,7 @@ static int is_numeric (const char *str)
  * an argument which will indicate if we want a recursive population or single level
  * Or better add a level variable, which will control the level depth.
  */
-pid_t *get_pid_tree (pid_t target_pid)
+pid_t *get_pid_tree (pid_t target_pid, pid_t *pidlist)
 {
   FILE *fp;
   DIR *dp;
@@ -309,19 +309,12 @@ pid_t *get_pid_tree (pid_t target_pid)
   int errno_bak, pidlist_count;
   const char base_path[] = "/proc/";
   char stat_file_path[BUFSIZ], buffer[BUFSIZ];
-  pid_t *pidlist, pid, ppid;
+  pid_t pid, ppid;
   
   dp = opendir (base_path);
   if (dp == NULL)
   {
     error (0, errno, "Error: %s", base_path);
-    return NULL;
-  }
-  
-  pidlist = malloc (sizeof (pid_t) * MAX_PIDS);
-  if (pidlist == NULL)
-  {
-    fprintf (stderr, "Error: Cannot allocate memory\n");
     return NULL;
   }
   
@@ -405,11 +398,18 @@ void usage (void)
   fprintf (stdout, "CPULeash: Keeps a given running process leashed under a certain cpu utilization threshold\n");
   fprintf (stdout, "Usage:\ncpuleash (-l scaled_percent | -L absolute_percent) -p pid [-s sample_time] [-v] [-h]\n");
   fprintf (stdout, 
-  "-l: Comma seperated scaled percent value. Range [0, 100]. Target cpu value divided by the number of cpu \n\
+  "-l: Comma seperated scaled percent value for each of the process specified in -p. Range [0, 100]. Target cpu value divided by the number of cpu \n\
     in the system. Current system: %d\n", ncpus);
   fprintf (stdout, 
-  "-L: Comma seperated absolute percent value. Range [0, %d]. Target cpu value is absolute.\n", 100 * ncpus);
+  "-L: Comma seperated absolute percent value for each of the process specified in -p. Range [0, %d]. Target cpu value is absolute.\n", 100 * ncpus);
+   fprintf (stdout, 
+  "-j: Scaled percent value for the process group list specified in -g or for the entire process tree with the root specified in -t. Range [0, 100]. Target cpu value divided by the number of cpu \n\
+    in the system. Current system: %d\n", ncpus);
+   fprintf (stdout, 
+  "-J: Scaled percent value for the process group list specified in -g or for the entire process tree with the root specified in -t. Range [0, %d]. Target cpu value is absolute.\n", 100 * ncpus);
   fprintf (stdout, "-p: Comma seperated PIDs to leash\n");
+  fprintf (stdout, "-g: Comma seperated PIDs to be leashed as one group\n");
+  fprintf (stdout, "-t: PID of the parent process, whole entire children tree is to be leashed as a group\n");
   fprintf (stdout, "-s: Sample time in seconds. Default 1.0s (optional)\n");
   fprintf (stdout, "-v: Verbose\n");
   fprintf (stdout, "-h: Shows this help\n");
@@ -522,7 +522,7 @@ double get_pid_cpu_util (pid_t pid, unsigned int flags, struct cpu_util_state *s
   pid_stat_fp = open_pid_stat (pid);
   if ((pid_stat_fp == NULL) && !is_pid_running (pid))
   {
-    fprintf (stdout, "pid = %d is not running anymore\n", pid);
+    fprintf (stdout, "pid = %d is not running anymore \n", pid);
     return -2;
   }
   uptime_fp = open_uptime_file ();
@@ -612,6 +612,9 @@ static int get_max_pids (void)
  ** TODO: Automatic tree leash. Given a process, leash it and all its children by populating them automatically.
  ** TODO: A configuration file, which this program will read periodically or on some signal, and add or remove
  ** pids on the run. (?)
+ ** TODO: Include an exclude list for tree leash?
+ ** TODO: Definitely skip the cpuleash itself to be leashed, special case.
+ ** TODO: Change the 'valid' flag to a bitfield. VALID, INVALID, IGNORED (for excluded processes)
  **
  */
 void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, int n, struct timespec *user_sample_time, int flags)
@@ -629,22 +632,12 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
   long int nlcores;
   
   pid_attr_ptr_arr_temp = malloc (sizeof (struct leash_pid_attrs) * get_max_pids ());
-  bitmap = malloc (sizeof (unsigned char) * (get_max_pids () / sizeof (unsigned char)));
-  memset (bitmap, 0, sizeof (unsigned char));
+  bitmap = calloc (sizeof (unsigned char), (get_max_pids () / sizeof (unsigned char)));
   
   set_signal_handler (); /* TODO: Later restore the handler while cleanup */
   
   nlcores = get_cpu_cores ();
-   
-  valid_count = 0;
-  list_for_each (pid_attr_list_temp, pid_attr_list_head)
-  {
-    pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
-    if (pid_attr_temp->valid)
-    {
-      valid_count++;
-    }
-  }
+  
   
   if ((flags & LFLG_SET_SAMPLE_TIME) && (user_sample_time != NULL))
   {
@@ -685,6 +678,7 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
     }
   }
   
+  /* Intended to hold the sequential sleep times */
   stop_segment = malloc (sizeof (long int) * get_max_pids ());
   if (stop_segment == NULL)
   {
@@ -692,59 +686,66 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
     return;
   }
   
+  if (flags & LFLG_TREE_GROUP)
+  {
+    /* Allocating maximum possible number of pids in an array.
+    * FIXME: Can we think about a linked list in this case?
+    */
+    children_pid_list = malloc (sizeof (pid_t) * get_max_pids ());
+  }
+  
   
   /* FIXME: See the valid count computation. This might have problems */
   sigsetjmp (jmp_env, 1);
   while (!sig_flag)
   { 
-    if (flags & LFLG_GROUP)
+    if (flags & (LFLG_GROUP | LFLG_TREE_GROUP))
     { 
       /* If we are group leashing then we need to first check which processes were 
        * added and then append them to the linked list, but we will not disturb the
        * existing process attributes
        */
-      // TODO: Later tree option. TODO: Get rid of this repetitive malloc-free stuff, use a static array instead
-      root_pid_attr = list_entry (pid_attr_list_head->next, struct leash_pid_attrs, pid_link);
-      children_pid_list = get_pid_tree (root_pid_attr->pid); // NOTE: Getting children tree. We can also read it from configuration file
       
-      // NOTE: DUMMY
-//       children_pid_list = malloc (sizeof (pid_t) * 1);
-//       children_pid_list[0] = -1;
-      
-      /* Count how many new pids have joined */
-      for (i = 0, new_pids = 0; children_pid_list[i] != -1; i++)
+      /* If this is a tree grouping, then auto populate the linked list */
+      if (flags & LFLG_TREE_GROUP)
       {
-        if (!IS_SET (bitmap, children_pid_list[i]))
+        root_pid_attr = list_entry (pid_attr_list_head->next, struct leash_pid_attrs, pid_link);
+        get_pid_tree (root_pid_attr->pid, children_pid_list); // NOTE: Getting children tree. We can also read it from configuration file
+      
+        /* Count how many new pids have joined */
+        for (i = 0, new_pids = 0; children_pid_list[i] != -1; i++)
         {
-          new_pids++;
+          if (!IS_SET (bitmap, children_pid_list[i]))
+          {
+            new_pids++;
+          }
+        }
+        /* Previously counted existing 'valid_count' plus newly added processes */
+        valid_count += new_pids;
+        
+        /* Add new pids in the linked list and initialize the dynamic and other parameters. Mark this newly added process in 'bitmap' */
+        for (i = 0; children_pid_list[i] != -1; i++)
+        {
+          if (!IS_SET (bitmap, children_pid_list[i]))
+          {
+            pid_attr_temp = malloc_leash_pid_attr ();
+            pid_attr_temp->pid = children_pid_list[i];
+            pid_attr_temp->valid = 1;
+            
+            pid_attr_temp->dyn_frac = ((1.0 / (valid_count * nlcores)) * group_leash_value);
+            pid_attr_temp->dyn_ratio = pid_attr_temp->dyn_frac;
+            pid_attr_temp->util = pid_attr_temp->dyn_frac;
+            
+            /* Initialize with first time call */
+            (void) get_pid_cpu_util (pid_attr_temp->pid, LFLG_RESET_CPU_ITER, &pid_attr_temp->util_state);
+            
+            list_add_tail (&pid_attr_temp->pid_link, pid_attr_list_head); /* Adding processes in the list */
+            SET (bitmap, children_pid_list[i]); // NOTE: As we are setting things in the next loop we can avoid doing it here
+          }
         }
       }
-      /* Previously counted existing 'valid_count' plus newly added processes */
-      valid_count += new_pids;
       
-      /* Add new pids in the linked list and initialize the dynamic and other parameters. Mark this newly added process in 'bitmap' */
-      for (i = 0; children_pid_list[i] != -1; i++)
-      {
-        if (!IS_SET (bitmap, children_pid_list[i]))
-        {
-          pid_attr_temp = malloc_leash_pid_attr ();
-          pid_attr_temp->pid = children_pid_list[i];
-          pid_attr_temp->valid = 1;
-          
-          pid_attr_temp->dyn_frac = ((1.0 / (valid_count * nlcores)) * group_leash_value);
-          pid_attr_temp->dyn_ratio = pid_attr_temp->dyn_frac;
-          pid_attr_temp->util = pid_attr_temp->dyn_frac;
-          
-          /* Initialize with first time call */
-          (void) get_pid_cpu_util (pid_attr_temp->pid, LFLG_RESET_CPU_ITER, &pid_attr_temp->util_state);
-          
-          list_add_tail (&pid_attr_temp->pid_link, pid_attr_list_head);
-          SET (bitmap, children_pid_list[i]); // NOTE: As we are setting things in the next loop we can avoid doing it here
-        }
-      }
-      free (children_pid_list);
-      
-      /* Depending upon the newly updated processes we adjust the faction for each 
+      /* Depending upon the newly updated processes we adjust the fraction for each 
        * process. The processes in a group has equal share of the group.
        */
       grp_total_frac_remain = 0.0;
@@ -752,6 +753,16 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
       list_for_each (pid_attr_list_temp, pid_attr_list_head)
       {
         pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
+        
+        /* Invalidate pid of cpuleash itself */
+        /* NOTE: We can do an exclude list in this way */
+        if (pid_attr_temp->pid == getpid ())
+        {
+          #if DEBUG==1
+            fprintf (stderr, "Excluding pid = %d\n",pid_attr_temp->pid);
+          #endif
+          pid_attr_temp->valid = 0;
+        }
 
         if (pid_attr_temp->valid)
         {
@@ -828,7 +839,7 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
       if (count % 24 == 0)
       {
         printf ("Total leashed processes: %d\n", valid_count);
-        printf ("Group leash enabled: %s\tGroup leash value: %lf\n", ((flags | LFLG_GROUP) ? "yes" : "no"), group_leash_value);
+        printf ("Group leash enabled: %s\tTree leash enabled: %s\tGroup leash value: %lf\n", ((flags | LFLG_GROUP) ? "yes" : "no"), ((flags | LFLG_TREE_GROUP) ? "yes" : "no"), group_leash_value);
         printf ("pid\ttarget\t\tcur_util\tdyn_ratio\tstop_time\trun_time\n");
       }
       
@@ -937,14 +948,17 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
         if (pid_attr_temp->util == -2) /*TODO: make this process a bit better */
         {
           pid_attr_temp->valid = 0;
-     
-          CLEAR (bitmap, pid_attr_temp->pid);
-          list_del (pid_attr_list_temp);
-          free_leash_pid_attrs (pid_attr_temp);
-          
           valid_count--;
-          printf ("valid_count = %d\n", valid_count);
         }
+      }
+      
+      if (!pid_attr_temp->valid)
+      {
+        CLEAR (bitmap, pid_attr_temp->pid);
+        list_del (pid_attr_list_temp);
+        free_leash_pid_attrs (pid_attr_temp);
+        
+        printf ("valid_count = %d\n", valid_count);
       }
     }
     
@@ -959,6 +973,10 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
   /* Uncomment when we use this first time. This avoids the compiler warning */
 //   LEASH_CLEANUP:
   
+  if (flags & LFLG_TREE_GROUP)
+  {
+    free (children_pid_list);
+  }
   free (pid_attr_ptr_arr_temp);
   free (stop_segment);
   free (bitmap);
@@ -970,7 +988,7 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
 
 int main (int argc, char *argv[])
 {
-  char c, *optsrting = "l:L:vs:p:hg:j:J:", *endptr, *sep = ",", *tok;
+  char c, *optsrting = "l:L:vs:p:hg:j:J:t:", *endptr, *sep = ",", *tok;
   double *l_val, *L_val;
   long int nproc;
   double sample_sec = -1, group_leash_value = -1;
@@ -978,9 +996,9 @@ int main (int argc, char *argv[])
   unsigned int flags = 0x00, param_comb_invalid = 0, show_usage = 0;
   struct timespec user_sample_time;
   struct leash_pid_attrs *pid_attr_temp;
-  struct list_head pid_attr_list_head, *pid_attr_list_temp;
+  struct list_head pid_attr_list_head, *pid_attr_list_temp, *temp_list_store;
   int pid_count = 0, l_val_count = 0, L_val_count = 0, pid_temp;
-  int p_or_g_flag = '\0', j_or_J = '\0';
+  int pgt_exclusive_flag = '\0', j_or_J = '\0';
   int l_val_alloc_size, L_val_alloc_size, pid_attr_alloc_size;
   
   /* TODO: resize as required */
@@ -1082,7 +1100,7 @@ int main (int argc, char *argv[])
         group_leash_value = strtod (optarg, &endptr);
         if (*endptr != '\0')
         {
-          fprintf (stderr, "Malformed argument for -j: %s\n", optarg);
+          fprintf (stderr, "Malformed argument for -j: %s\nSpecify one threshold applicable on the entire group specified by -g or -t\n", optarg);
           goto END_MAIN_CLEANUP;
         }
         
@@ -1110,7 +1128,7 @@ int main (int argc, char *argv[])
         group_leash_value = strtod (optarg, &endptr);
         if (*endptr != '\0')
         {
-          fprintf (stderr, "Malformed argument for -J: %s\n", optarg);
+          fprintf (stderr, "Malformed argument for -J: %s\nSpecify one threshold applicable on the entire group specified by -g or -t\n", optarg);
           goto END_MAIN_CLEANUP;
         }
         
@@ -1140,36 +1158,41 @@ int main (int argc, char *argv[])
         }
         
         break;
-        
+         
       case 'p':
-        if (p_or_g_flag == 'g')
+      case 't':
+      case 'g':
+        
+        if (pgt_exclusive_flag != '\0')
         {
-          fprintf (stderr, "Options -p and -g are mutually exclusive\n");
+          fprintf (stderr, "Options -p, -g and -t are mutually exclusive\n");
           goto END_MAIN_CLEANUP;
         }
         else
         {
-          p_or_g_flag = 'p';
+          pgt_exclusive_flag = c;
         }
-        /* fall-through */
         
-      case 'g':
-        if (p_or_g_flag == 'p')
-        {
-          fprintf (stderr, "Options -p and -g are mutually exclusive\n");
-        }
-        else
-        {
-          p_or_g_flag = 'g';
-        }
+        /* NOTE: For option -p, -g and -t , same processing, therefore the fall_through is set 
+         * to process the list in here
+         */
         /* TODO: if pid_count >= pid_attr_alloc_size then we need to resize */
         tok = strtok (optarg, sep);
         do
         {
+          /* When we are leashing a tree, cap the maximum trees that can be leashed
+           * by one cpuleash instance. Can be increased when scalability is higher.
+           */
+          if ((pgt_exclusive_flag == 't') && (pid_count == MAX_TREES))
+          {
+            fprintf (stderr, "Presently, only %d pid%s can be specified with the option -t\n", MAX_TREES, ((MAX_TREES <= 1) ? "" : "s"));
+            goto END_MAIN_CLEANUP;
+          }
+          
           pid_temp = strtol (tok, &endptr, 10);
           if (*endptr != '\0')
           {
-            fprintf (stderr, "Malformed argument for -p: %s\n", optarg);
+            fprintf (stderr, "Malformed argument for -%c: %s\n", pgt_exclusive_flag, optarg);
             goto END_MAIN_CLEANUP;
           }
         
@@ -1190,6 +1213,7 @@ int main (int argc, char *argv[])
         
         break;
         
+      
       case 'v':
         verbose = 1;
         break;
@@ -1214,7 +1238,7 @@ int main (int argc, char *argv[])
   
   /* The vaues of L_val_count or l_val_count and pid_count should be same */
   
-  if (p_or_g_flag == 'p')
+  if (pgt_exclusive_flag == 'p')
   {
     /* Mandatory -l or -L and -p */
     if ((l_val_count == 0) && (L_val_count == 0))
@@ -1224,7 +1248,7 @@ int main (int argc, char *argv[])
     }
   }
   
-  if (p_or_g_flag == 'g')
+  if (pgt_exclusive_flag == 'g')
   {
     if (j_or_J == '\0')
     {
@@ -1235,7 +1259,7 @@ int main (int argc, char *argv[])
   
   if (pid_count == 0)
   {
-    fprintf (stderr, "Process ID needs to be specified using -p\n");
+    fprintf (stderr, "Process ID needs to be specified using -p, -g or -t\n");
     param_comb_invalid = 1;
   }
   
@@ -1249,7 +1273,7 @@ int main (int argc, char *argv[])
    */
   /*
    * NOTE: Not using now. Need to decide on the group internal weights
-  if (p_or_g_flag == 'g')
+  if (pgt_exclusive_flag == 'g')
   {
     if ((l_val_count == 0) && (L_val_count == 0))
     {
@@ -1265,13 +1289,13 @@ int main (int argc, char *argv[])
   
   if ((l_val_count != 0) && (pid_count != l_val_count))
   {
-    fprintf (stderr, "Number of arguments in -l and -%c should be same\n", p_or_g_flag);
+    fprintf (stderr, "Number of arguments in -l and -%c should be same\n", pgt_exclusive_flag);
     show_usage = 1;
     goto END_MAIN_CLEANUP;
   }
   else if ((L_val_count != 0) && (pid_count != L_val_count))
   {
-    fprintf (stderr, "Number of arguments in -L and -%c should be same\n", p_or_g_flag);
+    fprintf (stderr, "Number of arguments in -L and -%c should be same\n", pgt_exclusive_flag);
     show_usage = 1;
     goto END_MAIN_CLEANUP;
   }
@@ -1326,11 +1350,34 @@ int main (int argc, char *argv[])
     if (verbose) fprintf (stdout, "frac = %lf\n", pid_attr_temp->frac);
     if (verbose) fprintf (stdout, "pid = %d\n", pid_attr_temp->pid);
   
-    if (p_or_g_flag == 'g')
+    if ((pgt_exclusive_flag == 'g') || (pgt_exclusive_flag == 't'))
     {
       flags |= LFLG_GROUP;
+      if (pgt_exclusive_flag == 't')
+      {
+        flags |= LFLG_TREE_GROUP;
+      }
     }
-    if (verbose) fprintf (stdout, "Leashing mode: %s\n", p_or_g_flag == 'p' ? "Individual" : "Group");
+    
+    if (verbose) 
+    {
+      if (pgt_exclusive_flag == 'p')
+      {
+        fprintf (stdout, "Leashing mode: Individual\n");
+      }
+      else if (pgt_exclusive_flag == 'g')
+      {
+        fprintf (stdout, "Leashing mode: Group\n");
+      }
+      else if (pgt_exclusive_flag == 't')
+      {
+        fprintf (stdout, "Leashing mode: Tree\n");
+      }
+      else
+      {
+        fprintf (stdout, "Leashing mode: Unknown\n");
+      }
+    }
     
     if (verbose) fprintf (stdout, "\n");
     
@@ -1353,8 +1400,19 @@ int main (int argc, char *argv[])
   /* Call leash_cpu */
   leash_cpu (&pid_attr_list_head, group_leash_value, pid_count, &user_sample_time, flags);
   
+  
   END_MAIN_CLEANUP:
   
+  /* Free the linked list if not already empty. TODO: Can be a bit more tidy. hint: call a function */
+  list_for_each_safe (pid_attr_list_temp, temp_list_store, &pid_attr_list_head)
+  {
+    pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
+    if (pid_attr_temp->valid)
+    {
+      list_del (pid_attr_list_temp);
+      free_leash_pid_attrs (pid_attr_temp);
+    }
+  }
   free (l_val);
   free (L_val);
   if (show_usage)
