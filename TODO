@@ -6,11 +6,11 @@ IMMEDIATE WORK: Go through the code and modularize, think on how this can be mad
 //                        and the sample time is t. Then when we sleep in the loop for s seconds and then
 //                        we again sleep for t seconds in the main loop making the sample interval s + t
 //                        needs to be checked.
-// TODO: Before exitting this program, we need to make sure to leave all the processes in running state [DONE]
+// TODO [DONE]: Before exitting this program, we need to make sure to leave all the processes in running state
 // TODO: See clock_nanosleep for better implementation possibility
-// TODO: If, for example an application is running in 40% and leash is given a target of 60%, how it will handle it ? [DONE]
-// TODO: handle multi threaded application. DONE
-// TODO: Handle process group capping 
+// TODO [DONE]: If, for example an application is running in 40% and leash is given a target of 60%, how it will handle it ?
+// TODO [DONE]: handle multi threaded application.
+// TODO [DONE]: Handle process group capping 
 // TODO: Maybe thermal capping in future
 // TODO: Deamonize
 // TODO: Do not multi-thread now 
@@ -37,7 +37,7 @@ IMMEDIATE WORK: Go through the code and modularize, think on how this can be mad
 
 // TODO: Addition of a configuration file which will be read on some signal or some other mechanism, so that pids can be added or removed to be monitored dynamically
 
-// BUG: When done something like this ./cpuleash -v -p 25302,25307,26431 -L 25,35,75 -s 0.5
+// BUG [FIXED]: When done something like this ./cpuleash -v -p 25302,25307,26431 -L 25,35,75 -s 0.5
 // it works. but if done something like this ./cpuleash -v -p 25302,25307,26431 -L 75,35,25 -s 0.5
 // The leashing does not leash as mentioned. I think there is a stale variable problem or some problem for which
 // The ordering in the argument is making some kind of problem [FIXED, sorting callback method had problem]
