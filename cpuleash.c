@@ -615,30 +615,82 @@ static int get_max_pids (void)
  ** TODO: Include an exclude list for tree leash?
  ** TODO: Definitely skip the cpuleash itself to be leashed, special case.
  ** TODO: Change the 'valid' flag to a bitfield. VALID, INVALID, IGNORED (for excluded processes)
+ ** TODO: Make a structure and pack these parameters, so that this interface is clean and so that we can add other
+ ** parameter members as we go on, if required.
  **
  */
 void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, int n, struct timespec *user_sample_time, int flags)
 {
-  struct list_head *pid_attr_list_temp, *temp_list_store;
-  struct leash_pid_attrs *pid_attr_temp, **pid_attr_ptr_arr_temp, *root_pid_attr;
-  struct timespec stop_time, run_time;
-  int count = 0, i;
-  long int sample_nsec = SAMPLE_NSEC;
-  long int *stop_segment, last_val;
-  unsigned char *bitmap;
-  pid_t *children_pid_list;
-  int valid_count, grp_over_thresh, grp_under_thresh, new_pids;
-  double grp_total_frac_remain = 0.0, grp_pid_frac_remain, frac_delta = 0.0, grp_pid_frac_tolerance = GRP_TOLERANCE;
-  long int nlcores;
+  struct list_head        *pid_attr_list_temp;           /* Linked list iterator */
+  struct list_head        *temp_list_store;              /* Linked list buffer for safe deletion */
+  struct leash_pid_attrs  *pid_attr_temp;                /* Linked list object temp buffer */
+  struct leash_pid_attrs **pid_attr_ptr_arr_temp = NULL; /* Temporary array of pointers to hold sorted (struct leash_pid_attrs *) */
+  struct leash_pid_attrs  *root_pid_attr;                /* Linked list entry representing the pid entry for the process tree root */
+  pid_t                   *children_pid_arr      = NULL; /* Array for holding all PIDs of all children of a single process. Used with tree option */
   
+  struct timespec          stop_time;                    /* Variable representing the amount to nanosleep after SIGSTOP */
+  struct timespec          run_time;                     /* Variable representing the amount to nanosleep after SIGCONT */
+  long int                 sample_nsec  = SAMPLE_NSEC;  /* Sample time for the process */
+  long int                *stop_segment = NULL;                 /* Array holding stop times for processes in nanoseconds */
+  long int                 last_val;                    /* Temporary variable while computing stop_segment */
+  
+  int                      count = 0;                   /* Variable counting the number of iterations for the main loop */
+  int                      i;                           /* Temporary loop iterator */
+  
+  unsigned char           *pid_bitmap           = NULL; /* Bitmap holding which PIDs are active */
+  int                      valid_count;                 /* How many processes are valid at this moment */
+  int                      grp_over_thresh;             /* How many processes in the group is over their thresholds */
+  int                      grp_under_thresh;            /* How many processes in the group is under their thresholds */
+  int                      new_pids;                    /* How many new processes have joined in this iteration */
+  
+  double grp_total_frac_remain         = 0.0;           /* Total group unused fraction of cpu */
+  double grp_pid_frac_remain;                           /* Unused fraction of cpu for a certain process */
+  double frac_delta                    = 0.0;           /* The amount of fraction to be distributed to the processes in the group */
+  double grp_pid_frac_tolerance        = GRP_TOLERANCE; /* Amount of fraction within which the process is allowed to vary its time usage */
+  long int nlcores;                                     /* Number of cores in this machine */
+  
+  /** Allocate max amount of arrays from heap before we start 
+   */
   pid_attr_ptr_arr_temp = malloc (sizeof (struct leash_pid_attrs) * get_max_pids ());
-  bitmap = calloc (sizeof (unsigned char), (get_max_pids () / sizeof (unsigned char)));
+  if (pid_attr_ptr_arr_temp == NULL)
+  {
+    fprintf (stderr, "Not enough memory\n");
+    goto LEASH_CLEANUP;
+  }
+  
+  pid_bitmap            = calloc (sizeof (unsigned char), (get_max_pids () / sizeof (unsigned char)));
+  if (pid_bitmap == NULL)
+  {
+    fprintf (stderr, "Not enough memory\n");
+    goto LEASH_CLEANUP;
+  }
+  
+  stop_segment = malloc (sizeof (long int) * get_max_pids ());
+  if (stop_segment == NULL)
+  {
+    fprintf (stderr, "Not enough memory\n");
+    goto LEASH_CLEANUP;
+  }
+    
+  if (flags & LFLG_TREE_GROUP)
+  {
+    /** FIXME: Can we think about a linked list in this case?
+     */
+    children_pid_arr = malloc (sizeof (pid_t) * get_max_pids ());
+    if (children_pid_arr == NULL)
+    {
+      fprintf (stderr, "Not enough memory\n");
+      goto LEASH_CLEANUP;
+    }
+  }
+
+  nlcores               = get_cpu_cores ();
   
   set_signal_handler (); /* TODO: Later restore the handler while cleanup */
   
-  nlcores = get_cpu_cores ();
   
-  
+  /** If user has something to set, then override the default 
+   */
   if ((flags & LFLG_SET_SAMPLE_TIME) && (user_sample_time != NULL))
   {
     #if DEBUG==1
@@ -648,7 +700,8 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
     sample_nsec = timespec_to_nsec (*user_sample_time);
   }
   
-  /* Count total processes */
+  /** Count total processes and mark the valid processes in the bitmap 'valid_count' to be used in the next loop.
+   */
   valid_count = 0;
   list_for_each (pid_attr_list_temp, pid_attr_list_head)
   {
@@ -657,96 +710,101 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
     if (pid_attr_temp->valid)
     {
       valid_count++;
-      SET (bitmap, pid_attr_temp->pid);
+      SET (pid_bitmap, pid_attr_temp->pid);
     }
   }
   
+  
+  /** Initialize 'struct leash_pid_attrs' for each given processes
+   */
   list_for_each (pid_attr_list_temp, pid_attr_list_head)
   {
     pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
   
     if (pid_attr_temp->valid)
     {
-      /* If we are group leashing then everyone has the same share within the group, 
-       * If we are not within a group then the share is as preset 
+      /** (a) If we are group leashing then everyone has the same share within the group, 
+       ** (b) If we are not within a group then the share is as preset 
        */
-      pid_attr_temp->dyn_frac = (flags & LFLG_GROUP) ? ((1.0 / (valid_count * nlcores)) * group_leash_value) : pid_attr_temp->frac;
+      pid_attr_temp->dyn_frac  = (flags & LFLG_GROUP) ? ((1.0 / (valid_count * nlcores)) * group_leash_value) : pid_attr_temp->frac;
       pid_attr_temp->dyn_ratio = pid_attr_temp->dyn_frac;
-      /* Initialize with first time call */
+      
+      /** Initialize with first time call 
+       */
       (void) get_pid_cpu_util (pid_attr_temp->pid, LFLG_RESET_CPU_ITER, &pid_attr_temp->util_state);
       pid_attr_temp->util = pid_attr_temp->dyn_frac;
     }
   }
   
-  /* Intended to hold the sequential sleep times */
-  stop_segment = malloc (sizeof (long int) * get_max_pids ());
-  if (stop_segment == NULL)
-  {
-    fprintf (stderr, "Not enough memory\n");
-    return;
-  }
   
-  if (flags & LFLG_TREE_GROUP)
-  {
-    /* Allocating maximum possible number of pids in an array.
-    * FIXME: Can we think about a linked list in this case?
-    */
-    children_pid_list = malloc (sizeof (pid_t) * get_max_pids ());
-  }
+  /* FIXME: See the 'valid_count' computation. This might have problems */
   
-  
-  /* FIXME: See the valid count computation. This might have problems */
+  /** SIGINT is programmed to terminate this loop gracefully. 'sig_flag' initially is false. 
+   ** Set jump buffer here. We have set SIGINT handler which will set 'sig_flag' as true and
+   ** make a long jump and therefore not let this loop execute.
+   */
   sigsetjmp (jmp_env, 1);
   while (!sig_flag)
   { 
+    /** If we are group leashing then we need to first check which processes were added and
+     ** then append them to the linked list, but we will not disturb the existing processes
+     ** attributes.
+     ** NOTE: Tree leashing is also a group leashing 
+     */
     if (flags & (LFLG_GROUP | LFLG_TREE_GROUP))
-    { 
-      /* If we are group leashing then we need to first check which processes were 
-       * added and then append them to the linked list, but we will not disturb the
-       * existing process attributes
+    {
+      /** If this is tree grouping, then auto populate the linked list 
        */
-      
-      /* If this is a tree grouping, then auto populate the linked list */
       if (flags & LFLG_TREE_GROUP)
       {
+        /** If tree leashing is enabled then we will take only the first entry from the user
+         ** provided process linked list and use that process to populate the children
+         */
+        /* TODO: children_pid_arr: best implemented as a linked list */
         root_pid_attr = list_entry (pid_attr_list_head->next, struct leash_pid_attrs, pid_link);
-        get_pid_tree (root_pid_attr->pid, children_pid_list); // NOTE: Getting children tree. We can also read it from configuration file
+        get_pid_tree (root_pid_attr->pid, children_pid_arr);
       
-        /* Count how many new pids have joined */
-        for (i = 0, new_pids = 0; children_pid_list[i] != -1; i++)
+        /** Count how many new PIDs have joined in this iteration
+         */
+        for (i = 0, new_pids = 0; children_pid_arr[i] != -1; i++)
         {
-          if (!IS_SET (bitmap, children_pid_list[i]))
+          if (!IS_SET (pid_bitmap, children_pid_arr[i]))
           {
             new_pids++;
           }
         }
-        /* Previously counted existing 'valid_count' plus newly added processes */
+        
+        /** Previously counted existing 'valid_count' plus newly added processes 
+         */
         valid_count += new_pids;
         
-        /* Add new pids in the linked list and initialize the dynamic and other parameters. Mark this newly added process in 'bitmap' */
-        for (i = 0; children_pid_list[i] != -1; i++)
+        /** Add new pids in the linked list and initialize the parameters.
+         ** Mark this newly added process in 'pid_bitmap'
+         */
+        for (i = 0; children_pid_arr[i] != -1; i++)
         {
-          if (!IS_SET (bitmap, children_pid_list[i]))
+          if (!IS_SET (pid_bitmap, children_pid_arr[i]))
           {
-            pid_attr_temp = malloc_leash_pid_attr ();
-            pid_attr_temp->pid = children_pid_list[i];
+            pid_attr_temp        = malloc_leash_pid_attr ();
+            pid_attr_temp->pid   = children_pid_arr[i];
             pid_attr_temp->valid = 1;
             
-            pid_attr_temp->dyn_frac = ((1.0 / (valid_count * nlcores)) * group_leash_value);
+            pid_attr_temp->dyn_frac  = ((1.0 / (valid_count * nlcores)) * group_leash_value);
             pid_attr_temp->dyn_ratio = pid_attr_temp->dyn_frac;
-            pid_attr_temp->util = pid_attr_temp->dyn_frac;
+            pid_attr_temp->util      = pid_attr_temp->dyn_frac;
             
             /* Initialize with first time call */
             (void) get_pid_cpu_util (pid_attr_temp->pid, LFLG_RESET_CPU_ITER, &pid_attr_temp->util_state);
             
-            list_add_tail (&pid_attr_temp->pid_link, pid_attr_list_head); /* Adding processes in the list */
-            SET (bitmap, children_pid_list[i]); // NOTE: As we are setting things in the next loop we can avoid doing it here
+            /* Adding processes in the list and set the bitmap */
+            list_add_tail (&pid_attr_temp->pid_link, pid_attr_list_head); 
+            SET (pid_bitmap, children_pid_arr[i]);
           }
         }
       }
       
-      /* Depending upon the newly updated processes we adjust the fraction for each 
-       * process. The processes in a group has equal share of the group.
+      /** Depending upon the newly updated processes we adjust the fraction for each 
+       ** process. The processes in a group has equal share of the group.
        */
       grp_total_frac_remain = 0.0;
       grp_under_thresh = grp_over_thresh = 0;
@@ -754,8 +812,8 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
       {
         pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
         
-        /* Invalidate pid of cpuleash itself */
-        /* NOTE: We can do an exclude list in this way */
+        /** Avoid shooting ourselves in our own foot 
+         */
         if (pid_attr_temp->pid == getpid ())
         {
           #if DEBUG==1
@@ -766,18 +824,22 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
 
         if (pid_attr_temp->valid)
         {
-          /* For the processes which are not utilising the current threshold the remaining
-           * quota is taken away and set to the last used cpu util of it. We will then 
-           * re-distribute the remaining fractions.
+          /** Update the cap depending on the currently running processes.For the processes 
+           ** which are not fully utilising the current threshold the remaining quota is 
+           ** taken away and set to the last used cpu util of it. We will then re-distribute
+           ** the remaining fractions.
            */
-          pid_attr_temp->dyn_frac = ((1.0 / (valid_count * nlcores)) * group_leash_value); // Update the cap depending on the currently running processes.
+          pid_attr_temp->dyn_frac = ((1.0 / (valid_count * nlcores)) * group_leash_value); 
           grp_pid_frac_remain = pid_attr_temp->dyn_frac - pid_attr_temp->util;
+
+          #if DEBUG==1          
+            fprintf (stderr, "pid = %d, tolerance ~ %lf, (dyn_frac = %lf) - (util = %lf) = (grp_pid_frac_remain = %lf)\n", pid_attr_temp->pid, grp_pid_frac_tolerance, pid_attr_temp->dyn_frac, pid_attr_temp->util, grp_pid_frac_remain);
+          #endif
           
-          // TODO: Remove line or make debug 
-//           printf ("%lf - %lf = grp_pid_frac_remain = %lf\n", pid_attr_temp->dyn_frac, pid_attr_temp->util, grp_pid_frac_remain);
-          
-          /* If the the process utilises less than the allowed fraction by a certain tolerance
-           * threshold then we take away the unused fraction from this process.
+          /** If the the process utilises less than the allowed fraction by a certain tolerance
+           ** threshold then we take away the unused fraction from this process. 
+           ** FIXME: Most possibly this will have skews, as the taken away and later given back
+           ** fractions may not completely add up. We need to check on this. 
            */
           if (grp_pid_frac_remain >= grp_pid_frac_tolerance)
           {
@@ -788,7 +850,8 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
       }
       grp_over_thresh = valid_count - grp_under_thresh;
       
-      /* Keep things in bounds */
+      /** Keep things in bounds 
+       */
       if (grp_total_frac_remain > 1.0)
       {
         grp_total_frac_remain = 1.0;
@@ -798,21 +861,20 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
         grp_total_frac_remain = 0.0;
       }
       
-      // TODO: Remove lines or make debug
-//       printf ("grp_total_frac_remain = %lf\n", grp_total_frac_remain);
-//       printf ("valid_count = %d, grp_over_thresh = %d\n", valid_count, grp_over_thresh);
-    }
+      #if DEBUG==1
+        fprintf (stderr, "grp_total_frac_remain = %lf, valid_count = %d, grp_over_thresh = %d, grp_under_thresh = %d\n", grp_total_frac_remain, valid_count, grp_under_thresh, grp_over_thresh);
+      #endif
+        
+        
+      /** If group leash, then compute the fraction to be distributed to each of the process in a group, 
+       ** This fraction is computed through the collected fractions of the processes which are underutilising
+       ** their allowed threshold fractions as in the above code segment
+       */ 
+       frac_delta = (grp_over_thresh > 0) ? (grp_total_frac_remain / (double) grp_over_thresh) : 0.0;
+    } /* End of group specific things */
 
-    /* If group leash, then compute the fraction to be distributed to each of the process in a group, 
-     * This fraction is computed through the collected fractions of the processes which are underutilising
-     * their allowed threshold fractions as in the above code segment
-     */ 
-    if (flags & LFLG_GROUP)
-    {
-      frac_delta = (grp_over_thresh > 0) ? (grp_total_frac_remain / (double) grp_over_thresh) : 0.0;
-    }
-   
-    valid_count = 0;
+    
+    i = 0;
     list_for_each (pid_attr_list_temp, pid_attr_list_head)
     {
       pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
@@ -825,13 +887,20 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
         pid_attr_temp->run_time_nsec  = pid_attr_temp->dyn_ratio * sample_nsec;
         pid_attr_temp->stop_time_nsec = sample_nsec - pid_attr_temp->run_time_nsec;
         
-        pid_attr_ptr_arr_temp[valid_count++] = pid_attr_temp;
-        SET (bitmap, pid_attr_temp->pid);
+        pid_attr_ptr_arr_temp[i++] = pid_attr_temp;
+        SET (pid_bitmap, pid_attr_temp->pid);
       }
     }
+    
+    #if DEBUG==1
+      if (i != valid_count)
+      {
+       fprintf (stderr, "valid_count mismatch\n");
+       goto LEASH_CLEANUP; /* FIXME: goto or raise ? */
+      }
+    #endif
   
-    /* TODO: Update the feedback function to have the 'dyn_frac' and other necessary
-     * modification for better information
+    /** Print feedback depending on verbose flag.
      */
     if (flags & LFLG_VERBOSE)
     {
@@ -861,17 +930,17 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
     }
     
     
-    /* FIXME: We need to make one iteration of the entire linked list and then populate
-     * an array with the stop_time_nsec values and the pid values, and then sort them by
-     * the stop_time_nsec values and use this array to call kill. As the pid space is small
-     * this intermediate array will not take much memory, but we need to try to find out 
-     * a better way if possible, which will also be faster. A Red-black tree?
+    /** TODO: We need to make one iteration of the entire linked list and then populate
+     ** an array with the 'stop_time_nsec' values and the pid values, and then sort them by
+     ** the 'stop_time_nsec' values and use this array to call kill. As the pid space is small
+     ** this intermediate array will not take much memory, but we need to try to find out 
+     ** a better way if possible, which will also be faster. A Red-Black tree?
      */
     
-    /* Sort the 'pid_attr' in ascending order by stop_time_nsec. Then find the 'stop_segment'
-     * timing after which the corresponding process should be started
-     */
     
+    /** Sort the 'pid_attr' in ascending order by stop_time_nsec. Then find the 'stop_segment'
+     ** timing after which the corresponding process should be started
+     */
     qsort (pid_attr_ptr_arr_temp, valid_count, sizeof (struct leash_pid_attrs *), leash_pid_attrs_compare);
     for (i=0, last_val=0; i<valid_count; i++)
     {
@@ -885,7 +954,7 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
     #if DEBUG==1
     for (i=0; i<valid_count; i++)
     {
-      printf ("stop_segment = %ld\n", stop_segment[i]);
+      fprintf (stderr, "stop_segment = %ld\n", stop_segment[i]);
     }
     #endif
     
@@ -894,27 +963,28 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
      * Or current implementation is fine?
      */
     
-    /* Stop all processes */
-    for (i=0; i<valid_count; i++)
-    {
-      if (pid_attr_ptr_arr_temp[i]->valid)
-      {
-        #if DEBUG==1
-        printf ("kill -SIGSTOP %d\n", pid_attr_ptr_arr_temp[i]->pid);
-        #endif
-        kill (pid_attr_ptr_arr_temp[i]->pid, SIGSTOP);
-      }
-    }
-    
-    /* Wake processes one by one in the order of stop_time_nsec, the amount of sleep is 
-     * guided by the 'stop_segment'
+    /** Stop all processes 
      */
     for (i=0; i<valid_count; i++)
     {
       if (pid_attr_ptr_arr_temp[i]->valid)
       {
         #if DEBUG==1
-        printf ("kill -SIGCONT %d\n", pid_attr_ptr_arr_temp[i]->pid);
+        fprintf (stderr, "kill -SIGSTOP %d\n", pid_attr_ptr_arr_temp[i]->pid);
+        #endif
+        kill (pid_attr_ptr_arr_temp[i]->pid, SIGSTOP);
+      }
+    }
+    
+    /** Wake processes one by one in the order of 'stop_time_nsec', the amount of sleep is 
+     ** guided by the 'stop_segment'
+     */
+    for (i=0; i<valid_count; i++)
+    {
+      if (pid_attr_ptr_arr_temp[i]->valid)
+      {
+        #if DEBUG==1
+        fprintf (stderr, "kill -SIGCONT %d\n", pid_attr_ptr_arr_temp[i]->pid);
         #endif
         stop_time = nsec_to_timespec (stop_segment[i]);
         do_complete_nanosleep (stop_time);
@@ -922,13 +992,13 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
       }
     }
     
-    /* Spend remaining sample time */
-    /* FIXME: This needs some care */
+    /** Spend remaining sample time waiting and letting the processes run
+     */
     for (i=valid_count-1; i>=0; i--)
     {
       if (pid_attr_ptr_arr_temp[i]->valid)
       {
-        /* FIXME: Make sure this computation works here. Need to find out the remaining time to spend running all the processes.
+        /* Make sure this computation works here. Need to find out the remaining time to spend running all the processes.
          * We take the last valid process with highest stop time
          */
         run_time = nsec_to_timespec(sample_nsec - pid_attr_ptr_arr_temp[i]->stop_time_nsec);
@@ -937,7 +1007,9 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
     }
     do_complete_nanosleep (run_time);
     
-    /* Get utilization for next iteration */
+    
+    /** Get utilization for next iteration
+     */
     list_for_each_safe (pid_attr_list_temp, temp_list_store, pid_attr_list_head)
     {
       pid_attr_temp = list_entry (pid_attr_list_temp, struct leash_pid_attrs, pid_link);
@@ -945,23 +1017,33 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
       {
         pid_attr_temp->util = get_pid_cpu_util (pid_attr_temp->pid, LFLG_OVERALL_CPU_PERCENT, &pid_attr_temp->util_state);
         
-        if (pid_attr_temp->util == -2) /*TODO: make this process a bit better */
+        /** FIXME: make this process a bit better? So that we can find if a process has terminated without calling 'get_pid_cpu_util' ? 
+         */
+        if (pid_attr_temp->util == -2)
         {
+          /** This process has, unfortunately, terminated
+           */
           pid_attr_temp->valid = 0;
           valid_count--;
         }
       }
       
+      /** Remove dead stuffs
+       */
       if (!pid_attr_temp->valid)
       {
-        CLEAR (bitmap, pid_attr_temp->pid);
+        CLEAR (pid_bitmap, pid_attr_temp->pid);
         list_del (pid_attr_list_temp);
         free_leash_pid_attrs (pid_attr_temp);
         
-        printf ("valid_count = %d\n", valid_count);
+        #if DEBUG==1
+          fprintf (stderr, "valid_count = %d\n", valid_count);
+        #endif
       }
     }
     
+    /** If no one is alive, then raise SIGINT which in-turn will gracefully terminate cpuleash
+     */
     if (valid_count == 0)
     {
       raise (SIGINT);
@@ -970,16 +1052,16 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
     count++;
   }
   
-  /* Uncomment when we use this first time. This avoids the compiler warning */
-//   LEASH_CLEANUP:
+  /* Cleanup mess */
+  LEASH_CLEANUP:
   
   if (flags & LFLG_TREE_GROUP)
   {
-    free (children_pid_list);
+    free (children_pid_arr);
   }
   free (pid_attr_ptr_arr_temp);
   free (stop_segment);
-  free (bitmap);
+  free (pid_bitmap);
   do_cleanup_pid (pid_attr_list_head);
   
   return;
