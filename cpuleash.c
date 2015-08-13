@@ -299,7 +299,8 @@ static int is_numeric (const char *str)
  * the returned memory block.
  * TODO: Add a feature which will collect the children pids recursively. Add 
  * an argument which will indicate if we want a recursive population or single level
- * Or better add a level variable, which will control the level depth.
+ * Or better add a level variable, which will control the level depth. We can use a
+ * Red-Black tree implementation for the map to look into.
  */
 pid_t *get_pid_tree (pid_t target_pid, pid_t *pidlist)
 {
@@ -415,6 +416,8 @@ void usage (void)
   fprintf (stdout, "-h: Shows this help\n");
   fprintf (stdout, "\nOption -p is mandatory. \n-l and -L are mutually exclusive and mandatory.\n");
   fprintf (stdout, "\nExample: The invocation `cpuleash -L 33,55,66,77 -p 123,456,789,345' will leash the PIDs to the corresponding percentages\n");
+  fprintf (stdout, "\nExample: The invocation `cpuleash -J 50 -g 123,456,789,345' will leash the PIDs as a group to be within 50% absolute threshold\n");
+  fprintf (stdout, "\nExample: The invocation `cpuleash -J 50 -t 123' will leash the given PID and auto-populated children of it as a group to be within 50% absolute threshold\n");
   fprintf (stdout, "\nCPULeash version %s\nAuthor: Arjun Pakrashi (phoxis [at] gmail [dot] com)\n", VERSION);
 }
 
@@ -586,6 +589,8 @@ double get_pid_cpu_util (pid_t pid, unsigned int flags, struct cpu_util_state *s
 }
 
 
+/** qsort comparator
+ */
 static int leash_pid_attrs_compare (const void *a, const void *b)
 {
   return (*((struct leash_pid_attrs **) a))->stop_time_nsec - (*((struct leash_pid_attrs **) b))->stop_time_nsec;
@@ -630,24 +635,24 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
   
   struct timespec          stop_time;                    /* Variable representing the amount to nanosleep after SIGSTOP */
   struct timespec          run_time;                     /* Variable representing the amount to nanosleep after SIGCONT */
-  long int                 sample_nsec  = SAMPLE_NSEC;  /* Sample time for the process */
-  long int                *stop_segment = NULL;                 /* Array holding stop times for processes in nanoseconds */
-  long int                 last_val;                    /* Temporary variable while computing stop_segment */
+  long int                 sample_nsec  = SAMPLE_NSEC;   /* Sample time for the process */
+  long int                *stop_segment = NULL;          /* Array holding stop times for processes in nanoseconds */
+  long int                 last_val;                     /* Temporary variable while computing stop_segment */
   
-  int                      count = 0;                   /* Variable counting the number of iterations for the main loop */
-  int                      i;                           /* Temporary loop iterator */
+  int                      count = 0;                    /* Variable counting the number of iterations for the main loop */
+  int                      i;                            /* Temporary loop iterator */
   
-  unsigned char           *pid_bitmap           = NULL; /* Bitmap holding which PIDs are active */
-  int                      valid_count;                 /* How many processes are valid at this moment */
-  int                      grp_over_thresh;             /* How many processes in the group is over their thresholds */
-  int                      grp_under_thresh;            /* How many processes in the group is under their thresholds */
-  int                      new_pids;                    /* How many new processes have joined in this iteration */
+  unsigned char           *pid_bitmap           = NULL;  /* Bitmap holding which PIDs are active */
+  int                      valid_count;                  /* How many processes are valid at this moment */
+  int                      grp_over_thresh;              /* How many processes in the group is over their thresholds */
+  int                      grp_under_thresh;             /* How many processes in the group is under their thresholds */
+  int                      new_pids;                     /* How many new processes have joined in this iteration */
   
-  double grp_total_frac_remain         = 0.0;           /* Total group unused fraction of cpu */
-  double grp_pid_frac_remain;                           /* Unused fraction of cpu for a certain process */
-  double frac_delta                    = 0.0;           /* The amount of fraction to be distributed to the processes in the group */
-  double grp_pid_frac_tolerance        = GRP_TOLERANCE; /* Amount of fraction within which the process is allowed to vary its time usage */
-  long int nlcores;                                     /* Number of cores in this machine */
+  double grp_total_frac_remain         = 0.0;            /* Total group unused fraction of cpu */
+  double grp_pid_frac_remain;                            /* Unused fraction of cpu for a certain process */
+  double frac_delta                    = 0.0;            /* The amount of fraction to be distributed to the processes in the group */
+  double grp_pid_frac_tolerance        = GRP_TOLERANCE;  /* Amount of fraction within which the process is allowed to vary its time usage */
+  long int nlcores;                                      /* Number of cores in this machine */
   
   /** Allocate max amount of arrays from heap before we start 
    */
@@ -736,9 +741,7 @@ void leash_cpu (struct list_head *pid_attr_list_head, double group_leash_value, 
     }
   }
   
-  
-  /* FIXME: See the 'valid_count' computation. This might have problems */
-  
+    
   /** SIGINT is programmed to terminate this loop gracefully. 'sig_flag' initially is false. 
    ** Set jump buffer here. We have set SIGINT handler which will set 'sig_flag' as true and
    ** make a long jump and therefore not let this loop execute.
