@@ -416,8 +416,8 @@ void usage (void)
   fprintf (stdout, "-h: Shows this help\n");
   fprintf (stdout, "\nOption -p is mandatory. \n-l and -L are mutually exclusive and mandatory.\n");
   fprintf (stdout, "\nExample: The invocation `cpuleash -L 33,55,66,77 -p 123,456,789,345' will leash the PIDs to the corresponding percentages\n");
-  fprintf (stdout, "\nExample: The invocation `cpuleash -J 50 -g 123,456,789,345' will leash the PIDs as a group to be within 50% absolute threshold\n");
-  fprintf (stdout, "\nExample: The invocation `cpuleash -J 50 -t 123' will leash the given PID and auto-populated children of it as a group to be within 50% absolute threshold\n");
+  fprintf (stdout, "\nExample: The invocation `cpuleash -J 50 -g 123,456,789,345' will leash the PIDs as a group to be within 50%% absolute threshold\n");
+  fprintf (stdout, "\nExample: The invocation `cpuleash -J 50 -t 123' will leash the given PID and auto-populated children of it as a group to be within 50%% absolute threshold\n");
   fprintf (stdout, "\nCPULeash version %s\nAuthor: Arjun Pakrashi (phoxis [at] gmail [dot] com)\n", VERSION);
 }
 
@@ -1195,7 +1195,7 @@ int main (int argc, char *argv[])
           goto END_MAIN_CLEANUP;
         }
         
-        group_leash_value = group_leash_value / (double) 100.0;
+        group_leash_value = nproc * group_leash_value / (double) 100.0;
 
         break;
         
@@ -1223,7 +1223,7 @@ int main (int argc, char *argv[])
           goto END_MAIN_CLEANUP;
         }
         
-        group_leash_value = group_leash_value / (double) (100.0 * nproc);
+        group_leash_value = nproc * group_leash_value / (double) (100.0 * nproc);
 
         break;
         
