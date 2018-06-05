@@ -25,7 +25,7 @@
 
 #include "list.h"
 
-#define VERSION "1.0"
+#define VERSION "1.9.1"
 
 #define BUF_MAX 256
 #define LMIN_PID_ATTR_N 16
