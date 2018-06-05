@@ -1,0 +1,46 @@
+[Overview]
+
+Caps cpu utilisation of a process, a group of processes or a tree of processes from user-space. Useful in the scenario where the process consumes 100% of the cpu all the time, but the user wants the process only to consume "x%" of the cpu. 
+
+
+--------
+
+[Features]
+
+Process ID needs to be specified using -p, -g or -t
+CPULeash: Keeps a given running process leashed under a certain cpu utilization threshold
+Usage:
+cpuleash (-l scaled_percent | -L absolute_percent) -p pid [-s sample_time] [-v] [-h]
+-l: Comma seperated scaled percent value for each of the process specified in -p. Range [0, 100]. Target cpu value divided by the number of cpu 
+    in the system. Current system: 8
+-L: Comma seperated absolute percent value for each of the process specified in -p. Range [0, 800]. Target cpu value is absolute.
+-j: Scaled percent value for the process group list specified in -g or for the entire process tree with the root specified in -t. Range [0, 100]. Target cpu value divided by the number of cpu 
+    in the system. Current system: 8
+-J: Scaled percent value for the process group list specified in -g or for the entire process tree with the root specified in -t. Range [0, 800]. Target cpu value is absolute.
+-p: Comma seperated PIDs to leash
+-g: Comma seperated PIDs to be leashed as one group
+-t: PID of the parent process, whole entire children tree is to be leashed as a group
+-s: Sample time in seconds. Default 1.0s (optional)
+-v: Verbose
+-h: Shows this help
+
+Option -p is mandatory. 
+-l and -L are mutually exclusive and mandatory.
+
+Example: The invocation `cpuleash -L 33,55,66,77 -p 123,456,789,345' will leash the PIDs to the corresponding percentages
+
+Example: The invocation `cpuleash -J 50 -g 123,456,789,345' will leash the PIDs as a group to be within 50% absolute threshold
+
+Example: The invocation `cpuleash -J 50 -t 123' will leash the given PID and auto-populated children of it as a group to be within 50% absolute threshold
+
+CPULeash version 1.9.1
+
+Author: Arjun Pakrashi (phoxis [at] gmail [dot] com)
+
+--------
+
+[Examples]
+
+For a usage example and overall working principle, see post: https://phoxis.org/2017/10/19/cpuleash-a-tool-for-capping-per-process-and-process-group-cpu-utilisation/
+
+--------
