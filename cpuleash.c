@@ -309,7 +309,7 @@ pid_t *get_pid_tree (pid_t target_pid, pid_t *pidlist)
   struct dirent *dir_entry;
   int errno_bak, pidlist_count;
   const char base_path[] = "/proc/";
-  char stat_file_path[BUFSIZ], buffer[BUFSIZ];
+  char stat_file_path[BUFSIZ];
   pid_t pid, ppid;
   
   dp = opendir (base_path);
@@ -333,7 +333,7 @@ pid_t *get_pid_tree (pid_t target_pid, pid_t *pidlist)
     {
       strcpy (stat_file_path, base_path);
       strcat (stat_file_path, dir_entry->d_name);
-      strcat (stat_file_path, "/status");
+      strcat (stat_file_path, "/stat");
       
       fp = fopen (stat_file_path, "r");
       if (fp == NULL)
@@ -342,36 +342,11 @@ pid_t *get_pid_tree (pid_t target_pid, pid_t *pidlist)
         continue;
       }
       
-      // Skip 3 lines
-      fgets (buffer, BUFSIZ, fp);
-      fgets (buffer, BUFSIZ, fp);
-      fgets (buffer, BUFSIZ, fp);
-      if (fscanf (fp, "%*s %s", buffer) == -1)
+      fscanf (fp, " %d %*s %*s %d", &pid, &ppid);
+      if (ppid == target_pid)
       {
-        fprintf (stderr, "Error: Parsing %s\n", stat_file_path);
+        pidlist[pidlist_count++] = pid;
       }
-      else
-      {
-        pid = (pid_t) atoi (buffer);
-//         printf ("pid = %d\n", pid);
-//         printf ("pid = %s\n", buffer);
-      }
-      
-      if (fscanf (fp, "%*s %s", buffer) == -1)
-      {
-        fprintf (stderr, "Error: Parsing %s\n", stat_file_path);
-      }
-      else
-      {
-//         printf ("ppid = %d\n", ppid);
-//         printf ("ppid = %s\n", buffer);
-        ppid = (pid_t) atoi (buffer);
-        if (ppid == target_pid)
-        {
-          pidlist[pidlist_count++] = pid;
-        }
-      }
-      
       fclose (fp);
     }
   }
